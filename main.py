@@ -1,5 +1,4 @@
 import os
-import joblib
 import logging
 import numpy as np
 import pandas as pd
@@ -14,11 +13,10 @@ from datetime import timedelta
 from telegram.error import TimedOut
 from telegram import Bot
 from tradingview_ta import TA_Handler, Interval
-from sklearn.linear_model import LinearRegression
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error, r2_score
 
+# -----------------------------------------------------------------------------
 # Load environment variables from .env file
+# -----------------------------------------------------------------------------
 load_dotenv()
 
 # -----------------------------------------------------------------------------
@@ -71,16 +69,8 @@ TOP_CRYPTOS = [
 TOP_ASSETS = TOP_STOCKS + TOP_CRYPTOS
 
 # --- Wallet Assets (always displayed after the top recommendations) ---
-WALLET_STOCKS = ["SPX500", "PDD", "SPOT", "1810.HK", "NVDA", "6055.HK", "9988.HK", "BABA", "CSCO", "PANW", "CPRT", "HFG", "PG", "DDOG", "XEL", "KO"]
-WALLET_CRYPTOS = ["SOL", "LTC", "XRP", "ONDO", "DOGE", "BTC", "BNB"]
-
-# FOR TESTING
-# TOP_STOCKS = ["AAPL"]
-# TOP_CRYPTOS = ["BTC"]
-# TOP_ASSETS = TOP_STOCKS + TOP_CRYPTOS
-# WALLET_STOCKS = ["PDD"]
-# WALLET_CRYPTOS = ["SOL"]
-
+WALLET_STOCKS = ["1810.HK", "APP", "9988.HK", "BABA", "BKNG", "CPRT", "CSCO", "DE", "KO", "NVDA", "PANW", "PDD", "SPOT", "VOO", "XEL", "ZS"]
+WALLET_CRYPTOS = ["BTC", "BNB","LTC", "JUP", "SUI", "PEPE", "WIF", "XRP"]
 
 # -----------------------------------------------------------------------------
 # Global Cache for TradingView Analysis (for improved performance)
@@ -168,7 +158,7 @@ def get_tradingview_analysis(symbol: str, exchange: str, screener: str, interval
             "moving_averages": analysis.moving_averages.get("RECOMMENDATION", "N/A"),
             "RSI": analysis.indicators.get("RSI", 50),
             "MACD_hist": analysis.indicators.get("MACD.macd", 0) - analysis.indicators.get("MACD.signal", 0),
-            "indicators": analysis.indicators
+            "indicators": analysis.indicators  # stored for fallback use in price fetching
         }
         analysis_cache[key] = result
         return result
@@ -229,8 +219,8 @@ def get_timeframe_scores(symbol: str, exchange: str, asset_type: str):
     Short: 15-minute interval; Mid: 1-hour interval; Long: daily (with weekly bonus).
     Returns a tuple: (short_score, mid_score, long_score)
     """
-    short_analysis = get_tradingview_analysis(symbol, exchange, asset_type, interval=Interval.INTERVAL_15_MINUTES)  # ✅ Fixed
-    mid_analysis = get_tradingview_analysis(symbol, exchange, asset_type, interval=Interval.INTERVAL_1_HOUR)  # ✅ Fixed
+    short_analysis = get_tradingview_analysis(symbol, exchange, asset_type, interval=Interval.INTERVAL_15_MINUTES)
+    mid_analysis = get_tradingview_analysis(symbol, exchange, asset_type, interval=Interval.INTERVAL_1_HOUR)
     long_analysis = get_tradingview_analysis(symbol, exchange, asset_type, interval=Interval.INTERVAL_1_DAY)
     weekly_analysis = get_tradingview_analysis(symbol, exchange, asset_type, interval=Interval.INTERVAL_1_WEEK)
     
@@ -241,73 +231,35 @@ def get_timeframe_scores(symbol: str, exchange: str, asset_type: str):
     return short_score, mid_score, long_score
 
 # -----------------------------------------------------------------------------
-# Improved Current Price Function with Timeframe Fallback
+# Improved Current Price Function with Fallback
 # -----------------------------------------------------------------------------
-def get_current_price(symbol: str, asset_type: str, timeframe: str = "short"):
+def get_current_price(symbol: str, asset_type: str, tv_indicators=None):
     """
-    Retrieve the current price using different intervals based on the trading timeframe.
-    timeframe: 'short', 'mid', or 'long'
+    Fetch the latest closing price from Yahoo Finance using a daily interval.
+    If no data is returned, fall back to TradingView's "close" price from tv_indicators.
     """
     try:
-        yf_symbol = symbol.replace("USDT", "-USD") if asset_type == "crypto" and symbol.endswith("USDT") else symbol
-        
-        if timeframe == "short":
-            # Intraday: try 1m; if empty, try 5m
-            df = yf.download(yf_symbol, period="1d", interval="1m")
-            if df.empty or df['Close'].dropna().empty:
-                df = yf.download(yf_symbol, period="1d", interval="5m")
-        elif timeframe == "mid":
-            # Use hourly data for swing trading
-            df = yf.download(yf_symbol, period="7d", interval="60m")
-        else:  # long-term
-            # Use daily data
-            df = yf.download(yf_symbol, period="1mo", interval="1d")
-        
-        if not df.empty and 'Close' in df.columns:
-            last_price = df['Close'].dropna().iloc[-1]
-            return float(last_price)
-        logging.warning(f"No price data returned for {symbol} with timeframe '{timeframe}'.")
+        # Determine the Yahoo Finance symbol.
+        if asset_type == "crypto":
+            yf_symbol = symbol.replace("USDT", "-USD")
+        else:
+            yf_symbol = symbol
+        # Always use daily data.
+        data = yf.download(yf_symbol, period="1d", interval="1d", progress=False)
+        if not data.empty and 'Close' in data.columns:
+            price = float(data['Close'].iloc[-1])
+            return price
+        logging.warning(f"No current price found for {yf_symbol} on Yahoo Finance.")
+        # Fallback: use TradingView's close if available.
+        if tv_indicators:
+            tv_close = tv_indicators.get("close")
+            if tv_close is not None:
+                logging.info(f"Using TradingView close price as fallback for {yf_symbol}.")
+                return float(tv_close)
         return None
     except Exception as e:
-        logging.error(f"Error retrieving current price for {symbol}: {e}")
+        logging.error(f"Error fetching current price for {yf_symbol}: {e}")
         return None
-
-# -----------------------------------------------------------------------------
-# Price Prediction Function (Unchanged)
-# -----------------------------------------------------------------------------
-def train_and_predict_price(symbol: str, asset_type: str, period: str = "1y"):
-    try:
-        yf_symbol = symbol.replace("USDT", "-USD") if asset_type == "crypto" and symbol.endswith("USDT") else symbol
-        df = yf.download(yf_symbol, period=period, interval='1d')
-        if df.empty or 'Close' not in df.columns:
-            logging.warning(f"No valid historical data found for {yf_symbol}.")
-            return None, None
-        df = df.reset_index()
-        df['DateOrdinal'] = df['Date'].apply(lambda x: x.toordinal())
-        df['SMA_7'] = df['Close'].rolling(window=7, min_periods=1).mean()
-        df['Volume'] = df.get('Volume', 0).fillna(0)
-        features = ['DateOrdinal', 'SMA_7', 'Volume']
-        X = df[features].values
-        y = df['Close'].values
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-        model = LinearRegression()
-        model.fit(X_train, y_train)
-        y_pred = model.predict(X_test)
-        mse = mean_squared_error(y_test, y_pred)
-        r2 = r2_score(y_test, y_pred)
-        logging.info(f"Trained model for {symbol}: MSE = {mse:.2f}, R2 = {r2:.2f}")
-        os.makedirs("models", exist_ok=True)
-        model_filename = os.path.join("models", f"{symbol}_linear_regression.joblib")
-        joblib.dump(model, model_filename)
-        logging.info(f"Saved model to {model_filename}")
-        last_row = df.iloc[-1]
-        tomorrow_ordinal = last_row['DateOrdinal'] + 1
-        feature_vector = np.array([[tomorrow_ordinal, last_row['SMA_7'], last_row['Volume']]])
-        predicted_price = model.predict(feature_vector)[0]
-        return predicted_price, r2
-    except Exception as e:
-        logging.error(f"Error training model for {symbol}: {e}")
-        return None, None
 
 # -----------------------------------------------------------------------------
 # Main Analysis Function (includes wallet assets and multi-timeframe evaluation)
@@ -330,7 +282,7 @@ def analyze_assets():
                 logging.warning(f"Skipping {asset}: Not found on supported stock exchanges.")
                 continue
 
-        # Get long-term daily and weekly analysis as before:
+        # Get daily and weekly analysis
         daily_analysis = get_tradingview_analysis(symbol, exchange, asset_type, interval=Interval.INTERVAL_1_DAY)
         if "error" in daily_analysis:
             logging.error(f"Error fetching daily analysis for {asset}: {daily_analysis['error']}")
@@ -341,7 +293,7 @@ def analyze_assets():
             logging.warning(f"Weekly analysis not available for {asset}. Using daily analysis only.")
             weekly_analysis = None
 
-        # Compute overall score as before
+        # Compute overall score
         score = evaluate_asset(daily_analysis, weekly_analysis)
         rec = daily_analysis.get("recommendation", "N/A")
         rec_prio = rec_priority(rec)
@@ -349,11 +301,11 @@ def analyze_assets():
 
         # Get multi-timeframe scores
         short_prob, mid_prob, long_prob = get_timeframe_scores(symbol, exchange, asset_type)
-        # Recommend the horizon with the highest probability
         horizons = {"Short": short_prob, "Mid": mid_prob, "Long": long_prob}
         recommended_horizon = max(horizons, key=horizons.get)
 
-        # Prepare asset data dictionary
+        # Prepare asset data dictionary.
+        # Note: 'Indicators' are saved to be used as fallback for price fetching.
         data = {
             "Symbol": daily_analysis["symbol"],
             "Exchange": daily_analysis["exchange"],
@@ -363,9 +315,9 @@ def analyze_assets():
             "MACD_Hist": daily_analysis["MACD_hist"],
             "Score": score,
             "RecPriority": rec_prio,
-            "Predicted Price": None,
+            "Predicted Price": None,    # Removed linear regression prediction.
             "Current Price": None,
-            "Model Accuracy": None,
+            "Model Accuracy": None,     # Removed model metrics.
             "Take Profit": None,
             "ATR": daily_analysis.get("indicators", {}).get("ATR", None),
             "Asset_Type": asset_type,
@@ -373,7 +325,8 @@ def analyze_assets():
             "Short Probability": short_prob,
             "Mid Probability": mid_prob,
             "Long Probability": long_prob,
-            "Recommended Horizon": recommended_horizon
+            "Recommended Horizon": recommended_horizon,
+            "Indicators": daily_analysis.get("indicators")
         }
         if asset_type == "crypto":
             crypto_results.append(data)
@@ -391,14 +344,11 @@ def analyze_assets():
     best_stocks = top_stocks.head(5)
     best_cryptos = top_cryptos.head(5)
 
-    # Run predictions and TP calculations for top assets
+    # Update top assets with current price and take profit calculations.
     for idx, row in top_stocks.iterrows():
-        predicted_price, model_accuracy = train_and_predict_price(row["Symbol"], row["Asset_Type"], period="1y")
-        # Use the recommended horizon for current price
-        current_price = get_current_price(row["Symbol"], row["Asset_Type"], timeframe=row["Recommended Horizon"].lower())
-        top_stocks.at[idx, "Predicted Price"] = predicted_price
+        # Linear regression prediction removed; set as None.
+        current_price = get_current_price(row["Symbol"], row["Asset_Type"], tv_indicators=row["Indicators"])
         top_stocks.at[idx, "Current Price"] = current_price
-        top_stocks.at[idx, "Model Accuracy"] = model_accuracy
         if current_price is not None:
             if row.get("ATR") is not None:
                 tp = calculate_take_profit_atr(current_price, row["ATR"], atr_stop_loss_multiplier=1.5, risk_reward_ratio=2.0)
@@ -407,11 +357,8 @@ def analyze_assets():
             top_stocks.at[idx, "Take Profit"] = tp
 
     for idx, row in top_cryptos.iterrows():
-        predicted_price, model_accuracy = train_and_predict_price(row["Symbol"], row["Asset_Type"], period="1y")
-        current_price = get_current_price(row["Symbol"], row["Asset_Type"], timeframe=row["Recommended Horizon"].lower())
-        top_cryptos.at[idx, "Predicted Price"] = predicted_price
+        current_price = get_current_price(row["Symbol"], row["Asset_Type"], tv_indicators=row["Indicators"])
         top_cryptos.at[idx, "Current Price"] = current_price
-        top_cryptos.at[idx, "Model Accuracy"] = model_accuracy
         if current_price is not None:
             if row.get("ATR") is not None:
                 tp = calculate_take_profit_atr(current_price, row["ATR"], atr_stop_loss_multiplier=1.5, risk_reward_ratio=2.0)
@@ -431,7 +378,7 @@ def analyze_assets():
         if "error" in daily_analysis:
             logging.warning(f"Skipping wallet stock {symbol}: {daily_analysis['error']}")
             continue
-        current_price = get_current_price(symbol, "america", timeframe="long")
+        current_price = get_current_price(symbol, "america", tv_indicators=daily_analysis.get("indicators"))
         rec = daily_analysis.get("recommendation", "N/A")
         wallet_stocks_list.append({
             "Symbol": symbol,
@@ -453,7 +400,7 @@ def analyze_assets():
         if "error" in daily_analysis:
             logging.warning(f"Skipping wallet crypto {symbol}: {daily_analysis['error']}")
             continue
-        current_price = get_current_price(symbol, "crypto", timeframe="short")
+        current_price = get_current_price(symbol, "crypto", tv_indicators=daily_analysis.get("indicators"))
         rec = daily_analysis.get("recommendation", "N/A")
         wallet_cryptos_list.append({
             "Symbol": symbol,
@@ -474,10 +421,8 @@ def analyze_assets():
 # -----------------------------------------------------------------------------
 # Telegram Messaging Function
 # -----------------------------------------------------------------------------
-# Store message IDs in a JSON file
 MESSAGE_LOG_FILE = "telegram_messages.json"
 
-# Function to save message IDs
 def save_message_id(message_id):
     try:
         if os.path.exists(MESSAGE_LOG_FILE):
@@ -485,15 +430,12 @@ def save_message_id(message_id):
                 data = json.load(f)
         else:
             data = []
-
         data.append(message_id)
-
         with open(MESSAGE_LOG_FILE, "w") as f:
             json.dump(data, f)
     except Exception as e:
         logging.error(f"Error saving message ID: {e}")
 
-# Function to load stored message IDs
 def load_message_ids():
     try:
         if os.path.exists(MESSAGE_LOG_FILE):
@@ -504,38 +446,29 @@ def load_message_ids():
         logging.error(f"Error loading message IDs: {e}")
         return []
 
-# Function to delete previous messages
 async def delete_previous_messages():
     bot = Bot(token=BOT_TOKEN)
     message_ids = load_message_ids()
-
     for msg_id in message_ids:
         try:
             await bot.delete_message(chat_id=CHAT_ID, message_id=msg_id)
-            await asyncio.sleep(0.5)  # Prevent API spam
+            await asyncio.sleep(0.5)
         except Exception as e:
             logging.warning(f"Could not delete message {msg_id}: {e}")
-
-    # Clear message log after deletion
     with open(MESSAGE_LOG_FILE, "w") as f:
         json.dump([], f)
 
-# Function to send a new message and store its ID
 async def send_message_to_telegram(text: str, delete_old: bool = False):
     bot = Bot(token=BOT_TOKEN)
-
-    # Delete previous messages if delete_old is True
     if delete_old:
         await delete_previous_messages()
-
-    max_length = 4096  # Telegram message length limit
+    max_length = 4096
     messages = [text[i:i+max_length] for i in range(0, len(text), max_length)]
-
     try:
         for msg in messages:
             sent_message = await bot.send_message(chat_id=CHAT_ID, text=msg)
             save_message_id(sent_message.message_id)
-            await asyncio.sleep(1)  # Small delay to avoid rate limits
+            await asyncio.sleep(1)
     except TimedOut:
         logging.error("Telegram API request timed out. Retrying in 10 seconds...")
         await asyncio.sleep(10)
@@ -551,7 +484,6 @@ def daily_job():
     logging.info("Starting daily analysis job...")
     best_stocks, top_stocks, best_cryptos, top_cryptos, wallet_stocks, wallet_cryptos = analyze_assets()
 
-    # Build the main message (without wallet assets)
     main_lines = [
         "📊 Daily Market Analysis 📊",
         "----------------------------------------",
@@ -619,7 +551,6 @@ def daily_job():
 
     main_message = "\n".join(main_lines)
 
-    # Build the wallet assets message separately
     wallet_lines = []
     wallet_lines.append("👜 My Stocks Wallet")
     wallet_lines.append("")
@@ -651,7 +582,6 @@ def daily_job():
 
     wallet_message = "\n".join(wallet_lines)
 
-    # Send the two messages separately:
     asyncio.run(send_message_to_telegram(main_message, delete_old=True))
     asyncio.run(send_message_to_telegram(wallet_message, delete_old=False))
     logging.info("Daily analysis job completed and messages sent.")
@@ -663,7 +593,7 @@ def main():
     schedule.every().day.at("08:00").do(daily_job)
     schedule.every().day.at("16:00").do(daily_job)
     daily_job()  # Optional immediate run
-    # Uncomment below to enable continuous scheduling:
+    # Uncomment below for continuous scheduling:
     # while True:
     #     schedule.run_pending()
     #     time.sleep(60)
