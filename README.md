@@ -65,13 +65,17 @@ Make sure you have the following tools installed:
    Typically, `requirements.txt` would include:
 
    ```text
-   python-dotenv
-   schedule
-   yfinance
-   pandas
-   numpy
-   tradingview_ta
-   python-telegram-bot==20.0
+    pandas
+    tradingview-ta
+    matplotlib
+    scikit-learn
+    yfinance
+    prophet
+    requests
+    telegram
+    python-telegram-bot
+    schedule
+    python-dotenv
    ```
 
    _(Adjust package versions as needed.)_

@@ -34,7 +34,7 @@ CHAT_ID = int(os.getenv("TELEGRAM_CHAT_ID"))
 # Global Risk Management Parameters
 # -----------------------------------------------------------------------------
 DEFAULT_STOP_LOSS = -0.30  # -30% stop loss
-DEFAULT_RISK_REWARD_RATIO = 2.0  # 2:1 risk-reward ratio
+DEFAULT_RISK_REWARD_RATIO = 3.0  # 3:1 risk-reward ratio
 
 # -----------------------------------------------------------------------------
 # Asset Lists
