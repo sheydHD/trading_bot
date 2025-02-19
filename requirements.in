@@ -1,0 +1,11 @@
+pandas
+tradingview-ta
+matplotlib
+scikit-learn
+yfinance
+prophet
+requests
+telegram
+python-telegram-bot
+schedule
+python-dotenv
