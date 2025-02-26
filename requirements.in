@@ -7,5 +7,6 @@ prophet
 requests
 telegram
 python-telegram-bot
-schedule
+# schedule
 python-dotenv
+apscheduler

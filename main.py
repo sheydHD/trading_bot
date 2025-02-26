@@ -1,15 +1,14 @@
 import os
 import logging
-import numpy as np
 import pandas as pd
 import asyncio
-import schedule
 import time
 import json
 from dotenv import load_dotenv
 
 import yfinance as yf
-from datetime import timedelta
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 from telegram.error import TimedOut
 from telegram import Bot
 from tradingview_ta import TA_Handler, Interval
@@ -37,10 +36,18 @@ DEFAULT_STOP_LOSS = -0.30  # -30% stop loss
 DEFAULT_RISK_REWARD_RATIO = 3.0  # 3:1 risk-reward ratio
 
 # -----------------------------------------------------------------------------
+# List of scheduled times
+# -----------------------------------------------------------------------------
+SCHEDULED_TIMES = [
+    "08:00", "15:35", "16:00", "16:30", 
+    "17:00", "18:00", "19:00", "20:00"
+]
+
+# -----------------------------------------------------------------------------
 # Asset Lists
 # -----------------------------------------------------------------------------
 TOP_STOCKS = [
-    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "GOOG", "META", "TSLA", "AVGO", "COST"
+    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "GOOG", "META", "TSLA", "AVGO", "COST",
     "NFLX", "ASML", "TMUS", "CSCO", "AZN", "LIN", "PEP", "ADBE", "QCOM", "AMD",
     "INTU", "ARM", "TXN", "BKNG", "MRVL", "CEG", "MSTR", "INTC", "TEAM", "ABNB",
     "CDNS", "CTAS", "MAR", "PLTR", "ADP", "ATVI", "BIDU", "BIIB", "BMRN", "CDW",
@@ -69,8 +76,8 @@ TOP_CRYPTOS = [
 TOP_ASSETS = TOP_STOCKS + TOP_CRYPTOS
 
 # --- Wallet Assets (always displayed after the top recommendations) ---
-WALLET_STOCKS = ["1810.HK", "APP", "9988.HK", "BABA", "BKNG", "CPRT", "CSCO", "DE", "KO", "NVDA", "PANW", "PDD", "SPOT", "VOO", "XEL", "ZS"]
-WALLET_CRYPTOS = ["BTC", "BNB","LTC", "JUP", "SUI", "PEPE", "WIF", "XRP"]
+WALLET_STOCKS = ["1810.HK", "BKNG", "CSCO", "CTAS", "CVX", "DE", "KO", "LRCX", "MSFT", "NVDA", "PDD", "SO", "TXN", "SPOT", "VOO", "XEL"]
+WALLET_CRYPTOS = ["BTC", "DEGEN","JUP", "PEPE", "WIF", "XRP"]
 
 # -----------------------------------------------------------------------------
 # Global Cache for TradingView Analysis (for improved performance)
@@ -589,14 +596,32 @@ def daily_job():
 # -----------------------------------------------------------------------------
 # Main Scheduler
 # -----------------------------------------------------------------------------
-def main():
-    schedule.every().day.at("08:00").do(daily_job)
-    schedule.every().day.at("16:00").do(daily_job)
-    daily_job()  # Optional immediate run
-    # Uncomment below for continuous scheduling:
-    # while True:
-    #     schedule.run_pending()
-    #     time.sleep(60)
+if __name__ == '__main__':
+    # -----------------------------------------------------------------------------
+    # APScheduler Setup
+    # -----------------------------------------------------------------------------
+    scheduler = BackgroundScheduler()
 
-if __name__ == "__main__":
-    main()
+    # Schedule a job for each time with misfire handling.
+    for t in SCHEDULED_TIMES:
+        hour, minute = map(int, t.split(':'))
+        trigger = CronTrigger(hour=hour, minute=minute)
+        scheduler.add_job(
+            daily_job,
+            trigger,
+            id=f"daily_job_{t}",
+            misfire_grace_time=3600,  # Allows the job to run if delayed within 1 hour.
+            coalesce=True           # If multiple runs are missed, only one execution occurs.
+        )
+        logging.info("Scheduled daily_job at %s", t)
+
+    scheduler.start()
+    logging.info("Scheduler started.")
+
+    try:
+        # Keep the main thread alive.
+        while True:
+            time.sleep(60)
+    except (KeyboardInterrupt, SystemExit):
+        scheduler.shutdown()
+        logging.info("Scheduler shutdown.")

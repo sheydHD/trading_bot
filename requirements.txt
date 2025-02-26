@@ -6,6 +6,8 @@
 #
 anyio==4.8.0
     # via httpx
+apscheduler==3.11.0
+    # via -r requirements.in
 beautifulsoup4==4.13.3
     # via yfinance
 certifi==2025.1.31
@@ -127,6 +129,8 @@ typing-extensions==4.12.2
     #   beautifulsoup4
 tzdata==2025.1
     # via pandas
+tzlocal==5.3
+    # via apscheduler
 urllib3==2.3.0
     # via requests
 yfinance==0.2.54

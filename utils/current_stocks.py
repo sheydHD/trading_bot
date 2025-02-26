@@ -13,8 +13,10 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 # -----------------------------------------------------------------------------
 # Asset Lists
 # -----------------------------------------------------------------------------
-TOP_STOCKS = ["1810.HK", "APP", "9988.HK", "BABA", "BKNG", "CPRT", "CSCO", "DE", "KO", "NVDA", "PANW", "PDD", "SPOT", "VOO", "XEL", "ZS"]
-TOP_CRYPTOS = ["BTC", "BNB","LTC", "JUP", "SUI", "PEPE", "WIF", "XRP"]
+TOP_STOCKS = ["BABA"]
+
+# TOP_STOCKS = ["1810.HK", "BKNG", "CSCO", "CTAS", "CVX", "DE", "KO", "LRCX", "MSFT", "NVDA", "PDD", "SO", "TXN", "SPOT", "VOO", "XEL"]
+TOP_CRYPTOS = ["BTC", "DEGEN","JUP", "PEPE", "WIF", "XRP"]
 TOP_ASSETS = TOP_STOCKS + TOP_CRYPTOS
 
 # -----------------------------------------------------------------------------
