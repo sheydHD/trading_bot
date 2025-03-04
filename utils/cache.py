@@ -6,11 +6,17 @@ import time
 import logging
 
 class PersistentCache:
-    def __init__(self, cache_file="analysis_cache.json", expiry_seconds=3600):
+    """A simple cache that persists to disk."""
+    
+    def __init__(self, cache_file="cache.json", initial_data=None, expiry_seconds=3600):
         self.cache_file = cache_file
         self.expiry_seconds = expiry_seconds
-        self.cache = self._load_cache()
+        self.cache = initial_data or self._load_cache()
         
+        # Save cache immediately if initial data was provided
+        if initial_data:
+            self._save_cache()
+    
     def _load_cache(self):
         """Load cache from file if it exists."""
         if os.path.exists(self.cache_file):
@@ -27,8 +33,10 @@ class PersistentCache:
         try:
             with open(self.cache_file, 'w') as f:
                 json.dump(self.cache, f)
+            return True
         except Exception as e:
             logging.error(f"Error saving cache: {e}")
+            return False
     
     def get(self, key):
         """Get value from cache if it exists and is not expired."""
@@ -39,7 +47,7 @@ class PersistentCache:
                 return entry["data"]
         return None
     
-    def set(self, key, value):
+    def set(self, key, value, expiry_seconds=None):
         """Set value in cache with current timestamp."""
         str_key = str(key)  # Convert tuple to string for JSON
         self.cache[str_key] = {
@@ -62,4 +70,9 @@ class PersistentCache:
         
         if expired_keys:
             self._save_cache()
-            logging.info(f"Cleared {len(expired_keys)} expired cache entries") 
+            logging.info(f"Cleared {len(expired_keys)} expired cache entries")
+
+    def clear(self):
+        """Clear the cache."""
+        self.cache = {}
+        self._save_cache() 

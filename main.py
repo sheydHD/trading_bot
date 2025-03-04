@@ -287,7 +287,17 @@ def get_timeframe_scores(symbol: str, exchange: str, asset_type: str):
 # -----------------------------------------------------------------------------
 # Main Analysis Function (includes wallet assets and multi-timeframe evaluation)
 # -----------------------------------------------------------------------------
-def analyze_assets():
+def analyze_assets(send_messages=False):
+    """
+    Main analysis function used by both command line and API.
+    
+    Args:
+        send_messages: Whether to send Telegram/email messages (True for CLI, False for API)
+    
+    Returns:
+        Tuple of DataFrames containing analysis results
+    """
+    print("Starting analysis process...")
     stock_results = []
     crypto_results = []
 
@@ -390,7 +400,132 @@ def analyze_assets():
     wallet_stocks_df = pd.DataFrame(wallet_stocks_list).sort_values(by="RecPriority", ascending=True)
     wallet_cryptos_df = pd.DataFrame(wallet_cryptos_list).sort_values(by="RecPriority", ascending=True)
 
-    return best_stocks, top_stocks, best_cryptos, top_cryptos, wallet_stocks_df, wallet_cryptos_df
+    # Create result DataFrames (ensure they're not empty)
+    best_stocks_df = pd.DataFrame(best_stocks) if not best_stocks.empty else pd.DataFrame()
+    top_stocks_df = pd.DataFrame(top_stocks)
+    best_cryptos_df = pd.DataFrame(best_cryptos) if not best_cryptos.empty else pd.DataFrame()
+    top_cryptos_df = pd.DataFrame(top_cryptos)
+    wallet_stocks_df = pd.DataFrame(wallet_stocks_list).sort_values(by="RecPriority", ascending=True)
+    wallet_cryptos_df = pd.DataFrame(wallet_cryptos_list).sort_values(by="RecPriority", ascending=True)
+    
+    # Format messages for Telegram and email
+    main_lines = []
+    main_lines.append("📊 Market Analysis Report")
+    main_lines.append("")
+
+    # Add best stocks
+    main_lines.append("🔥 Best Stock Picks (Top 5) 🔥")
+    main_lines.append("")
+    if not best_stocks_df.empty:
+        for _, row in best_stocks_df.iterrows():
+            try:
+                line = format_asset_line(row)
+                main_lines.append(line)
+                main_lines.append("")
+            except Exception as e:
+                print(f"Error formatting stock {row.get('Symbol', 'unknown')}: {e}")
+                main_lines.append(f"• {row.get('Symbol', 'unknown')}: Error displaying data")
+                main_lines.append("")
+    else:
+        main_lines.append("No bullish stocks found. 😔")
+        main_lines.append("")
+
+    # Add best cryptos
+    main_lines.append("🔥 Best Crypto Picks (Top 5) 🔥")
+    main_lines.append("")
+    if not best_cryptos_df.empty:
+        for _, row in best_cryptos_df.iterrows():
+            try:
+                line = format_asset_line(row)
+                main_lines.append(line)
+                main_lines.append("")
+            except Exception as e:
+                print(f"Error formatting crypto {row.get('Symbol', 'unknown')}: {e}")
+                main_lines.append(f"• {row.get('Symbol', 'unknown')}: Error displaying data")
+                main_lines.append("")
+    else:
+        main_lines.append("No bullish cryptos found. 😔")
+        main_lines.append("")
+
+    main_message = "\n".join(main_lines)
+
+    wallet_lines = []
+    wallet_lines.append("👜 My Stocks Wallet")
+    wallet_lines.append("")
+    if not wallet_stocks_df.empty:
+        for _, row in wallet_stocks_df.iterrows():
+            try:
+                line = format_asset_line(row)
+                wallet_lines.append(line)
+                wallet_lines.append("")
+            except Exception as e:
+                print(f"Error formatting wallet stock {row.get('Symbol', 'unknown')}: {e}")
+                wallet_lines.append(f"• {row.get('Symbol', 'unknown')}: Error displaying data")
+                wallet_lines.append("")
+    else:
+        wallet_lines.append("No wallet stocks data available. 😔")
+        wallet_lines.append("")
+
+    wallet_lines.append("👜 My Cryptos Wallet")
+    wallet_lines.append("")
+    if not wallet_cryptos_df.empty:
+        for _, row in wallet_cryptos_df.iterrows():
+            try:
+                line = format_asset_line(row)
+                wallet_lines.append(line)
+                wallet_lines.append("")
+            except Exception as e:
+                print(f"Error formatting wallet crypto {row.get('Symbol', 'unknown')}: {e}")
+                wallet_lines.append(f"• {row.get('Symbol', 'unknown')}: Error displaying data")
+                wallet_lines.append("")
+    else:
+        wallet_lines.append("No wallet cryptos data available. 😔")
+        wallet_lines.append("")
+
+    wallet_message = "\n".join(wallet_lines)
+
+    # Only send messages if requested (CLI mode)
+    if send_messages:
+        try:
+            # Format messages
+            main_lines = []
+            main_lines.append("📊 Market Analysis Report")
+            
+            print(f"Attempting to send Telegram message, TELEGRAM_BOT_TOKEN: {BOT_TOKEN[:4]}..., CHAT_ID: {CHAT_ID}")
+            
+            # Send to Telegram
+            asyncio.run(send_message_to_telegram(main_message, delete_old=True))
+            asyncio.run(send_message_to_telegram(wallet_message, delete_old=False))
+            
+            print("Telegram messages sent successfully")
+            
+            # Send to email
+            if os.getenv("EMAIL_ENABLED", "false").lower() == "true":
+                print(f"Email enabled, attempting to send to: {os.getenv('EMAIL_RECIPIENT')}")
+                # Extract subject from first line
+                first_line = main_lines[0] if main_lines else "Trading Bot Update"
+                subject = first_line[:50] + "..." if len(first_line) > 50 else first_line
+                
+                # Combine messages for email
+                full_content = main_message + "\n\n" + wallet_message
+                
+                # Send email directly
+                send_email(subject, full_content)
+                print("Email sent successfully")
+            else:
+                print("Email sending is disabled in environment variables")
+        except Exception as e:
+            print(f"Error sending messages: {e}")
+            # Print a more detailed stack trace for debugging
+            import traceback
+            traceback.print_exc()
+    
+    # Debug logging before returning
+    logging.info(f"Analysis completed. Found {len(best_stocks_df)} best stocks, {len(best_cryptos_df)} best cryptos")
+    logging.info(f"DataFrame shapes - best_stocks: {best_stocks_df.shape}, best_cryptos: {best_cryptos_df.shape}")
+    
+    # Return all DataFrames for web UI
+    return best_stocks_df, top_stocks_df, best_cryptos_df, top_cryptos_df, wallet_stocks_df, wallet_cryptos_df
 
 def analyze_single_asset(asset):
     asset_type = detect_asset_type(asset)
@@ -514,18 +649,29 @@ async def send_message_to_telegram(text: str, delete_old: bool = False):
         await delete_previous_messages()
     max_length = 4096
     messages = [text[i:i+max_length] for i in range(0, len(text), max_length)]
+    sent_message_ids = []
     try:
         for msg in messages:
             sent_message = await bot.send_message(chat_id=CHAT_ID, text=msg)
+            sent_message_ids.append(sent_message.message_id)
             save_message_id(sent_message.message_id)
             await asyncio.sleep(1)
+        logging.info(f"Successfully sent {len(messages)} message(s) to Telegram")
+        return sent_message_ids
     except TimedOut:
         logging.error("Telegram API request timed out. Retrying in 10 seconds...")
         await asyncio.sleep(10)
+        sent_message_ids = []
         for msg in messages:
             sent_message = await bot.send_message(chat_id=CHAT_ID, text=msg)
+            sent_message_ids.append(sent_message.message_id)
             save_message_id(sent_message.message_id)
             await asyncio.sleep(1)
+        logging.info(f"Successfully sent {len(messages)} message(s) to Telegram after retry")
+        return sent_message_ids
+    except Exception as e:
+        logging.error(f"Error sending Telegram message: {str(e)}")
+        return []
 
 # -----------------------------------------------------------------------------
 # Scheduled Job: Build and Send the Message
@@ -533,8 +679,8 @@ async def send_message_to_telegram(text: str, delete_old: bool = False):
 def daily_job():
     try:
         logging.info("Starting daily analysis job...")
-        best_stocks, top_stocks, best_cryptos, top_cryptos, wallet_stocks, wallet_cryptos = analyze_assets()
-        
+        best_stocks, top_stocks, best_cryptos, top_cryptos, wallet_stocks, wallet_cryptos = analyze_assets(send_messages=True)
+
         main_lines = [
             "📊 Daily Market Analysis 📊",
             "----------------------------------------",
@@ -641,7 +787,7 @@ def daily_job():
             # Combine messages for email
             full_content = main_message + "\n\n" + wallet_message
             
-            # Send email directly (not through Telegram)
+            # Send email directly
             send_email(subject, full_content)
         
         logging.info("Daily analysis job completed and messages sent.")
@@ -680,8 +826,25 @@ def signal_handler(sig, frame):
     logging.info("Scheduler shutdown complete.")
     sys.exit(0)
 
+def reset_telegram_messages():
+    try:
+        if os.path.exists(MESSAGE_LOG_FILE):
+            with open(MESSAGE_LOG_FILE, "r") as f:
+                data = json.load(f)
+            # Remove the last 2 message IDs
+            data = data[:-2] if len(data) >= 2 else []
+            with open(MESSAGE_LOG_FILE, "w") as f:
+                json.dump(data, f)
+            logging.info(f"Removed last 2 message IDs from {MESSAGE_LOG_FILE}")
+        else:
+            logging.warning(f"{MESSAGE_LOG_FILE} does not exist")
+    except Exception as e:
+        logging.error(f"Error updating message IDs: {e}")
+
 if __name__ == '__main__':
     setup_logging()
+    # Remove the last 2 message IDs from telegram_messages.json
+    reset_telegram_messages()
     # -----------------------------------------------------------------------------
     # APScheduler Setup
     # -----------------------------------------------------------------------------
@@ -707,7 +870,7 @@ if __name__ == '__main__':
     # Register signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    
+
     try:
         # Keep the main thread alive.
         while True:

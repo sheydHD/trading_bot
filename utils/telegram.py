@@ -48,34 +48,83 @@ async def delete_previous_messages():
         json.dump([], f)
 
 async def send_message_to_telegram(text: str, delete_old: bool = False):
-    bot = Bot(token=BOT_TOKEN)
-    if delete_old:
-        await delete_previous_messages()
-    max_length = 4096
-    messages = [text[i:i+max_length] for i in range(0, len(text), max_length)]
+    """
+    Sends a message to Telegram chat and optionally deletes old messages.
+    
+    Args:
+        text: The message text to send
+        delete_old: Whether to delete previous messages before sending
+    
+    Returns:
+        The message ID of the sent message
+    """
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    
+    if not bot_token or not chat_id:
+        logging.warning("Telegram credentials not found in environment variables")
+        return None
+    
     try:
-        # Send messages to Telegram
-        for msg in messages:
-            sent_message = await bot.send_message(chat_id=CHAT_ID, text=msg)
-            save_message_id(sent_message.message_id)
-            await asyncio.sleep(1)
+        bot = Bot(token=bot_token)
+        
+        # Delete old messages if requested
+        if delete_old:
+            # Read message IDs from file
+            messages_file = "telegram_messages.json"
+            message_ids = []
             
-        # Forward to email (first message will be used as subject)
-        if messages:
-            first_line = messages[0].split('\n', 1)[0] if '\n' in messages[0] else messages[0]
-            subject = first_line[:50] + "..." if len(first_line) > 50 else first_line
-            full_content = '\n'.join(messages)
+            if os.path.exists(messages_file):
+                try:
+                    with open(messages_file, 'r') as f:
+                        message_ids = json.load(f)
+                        logging.info(f"Loaded {len(message_ids)} message IDs from {messages_file}")
+                except Exception as e:
+                    logging.error(f"Error reading message IDs: {e}")
+                    message_ids = []
             
-            # Use asyncio to run email sending in background
-            asyncio.create_task(send_email_async(subject, full_content))
-            
-    except TimedOut:
-        logging.error("Telegram API request timed out. Retrying in 10 seconds...")
-        await asyncio.sleep(10)
-        for msg in messages:
-            sent_message = await bot.send_message(chat_id=CHAT_ID, text=msg)
-            save_message_id(sent_message.message_id)
-            await asyncio.sleep(1)
+            # Delete messages
+            if message_ids:
+                logging.info(f"Attempting to delete {len(message_ids)} previous messages: {message_ids}")
+                for msg_id in message_ids:
+                    try:
+                        await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+                        logging.info(f"Successfully deleted message ID: {msg_id}")
+                    except Exception as e:
+                        logging.warning(f"Could not delete message {msg_id}: {e}")
+        
+        # Send new message
+        message = await bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+        logging.info(f"Sent telegram message with ID: {message.message_id}")
+        
+        # Update message ID in file
+        messages_file = "telegram_messages.json"
+        message_ids = []
+        
+        # Read existing IDs if file exists
+        if os.path.exists(messages_file):
+            try:
+                with open(messages_file, 'r') as f:
+                    message_ids = json.load(f)
+            except Exception:
+                message_ids = []
+        
+        # Add new message ID
+        message_ids.append(message.message_id)
+        
+        # Keep only the last 2 messages
+        if len(message_ids) > 2:
+            message_ids = message_ids[-2:]
+        
+        # Write IDs back to file
+        with open(messages_file, 'w') as f:
+            json.dump(message_ids, f)
+            logging.info(f"Updated message IDs file with: {message_ids}")
+        
+        return message.message_id
+    except Exception as e:
+        logging.error(f"Error sending message to Telegram: {e}")
+        return None
 
 async def send_email_async(subject, content):
     """Run the email sending function asynchronously."""

@@ -7,6 +7,7 @@ prophet
 requests
 telegram
 python-telegram-bot
-# schedule
 python-dotenv
 apscheduler
+flask
+flask-cors
