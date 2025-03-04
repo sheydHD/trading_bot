@@ -26,6 +26,7 @@ from utils.config import (
 )
 from utils.rate_limiter import rate_limited
 from utils.cache import PersistentCache
+from utils.email import send_email
 
 # -----------------------------------------------------------------------------
 # Load environment variables from .env file
@@ -79,6 +80,9 @@ SCHEDULED_TIMES = [
 # -----------------------------------------------------------------------------
 # Asset Lists
 # -----------------------------------------------------------------------------
+# TOP_STOCKS = [
+#     "AAPL"]
+
 TOP_STOCKS = [
     "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "GOOG", "META", "TSLA", "AVGO", "COST",
     "NFLX", "ASML", "TMUS", "CSCO", "AZN", "LIN", "PEP", "ADBE", "QCOM", "AMD",
@@ -96,6 +100,9 @@ TOP_STOCKS = [
     "GE", "DE", "SCHW", "MMM", "ADP", "BKNG", "SYK", "CI", "CB", "C",
     "USB", "T", "LOW", "MO", "BMY", "UNP", "RTX", "DUK", "SO", "APD"
 ]
+
+# TOP_CRYPTOS = [
+#     "BTC"]
 
 TOP_CRYPTOS = [
     "BTC", "ETH", "USDT", "BNB", "XRP", "SOL", "USDC", "ADA", "DOGE", "TRX"
@@ -621,12 +628,26 @@ def daily_job():
 
         wallet_message = "\n".join(wallet_lines)
 
+        # Send to Telegram
         asyncio.run(send_message_to_telegram(main_message, delete_old=True))
         asyncio.run(send_message_to_telegram(wallet_message, delete_old=False))
+        
+        # Send directly to email
+        if os.getenv("EMAIL_ENABLED", "false").lower() == "true":
+            # Extract subject from first line
+            first_line = main_lines[0] if main_lines else "Trading Bot Update"
+            subject = first_line[:50] + "..." if len(first_line) > 50 else first_line
+            
+            # Combine messages for email
+            full_content = main_message + "\n\n" + wallet_message
+            
+            # Send email directly (not through Telegram)
+            send_email(subject, full_content)
+        
         logging.info("Daily analysis job completed and messages sent.")
     except Exception as e:
         error_message = f"❌ Error in daily analysis job: {str(e)}"
-        logging.error(error_message, exc_info=True)  # Add exc_info to get the full traceback
+        logging.error(error_message, exc_info=True)
         asyncio.run(send_message_to_telegram(error_message, delete_old=False))
 
 def format_asset_line(row):
