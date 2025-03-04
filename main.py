@@ -5,6 +5,10 @@ import asyncio
 import time
 import json
 from dotenv import load_dotenv
+import concurrent.futures
+import logging.handlers
+import signal
+import sys
 
 import yfinance as yf
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -12,6 +16,16 @@ from apscheduler.triggers.cron import CronTrigger
 from telegram.error import TimedOut
 from telegram import Bot
 from tradingview_ta import TA_Handler, Interval
+
+from utils.analysis import analyze_assets, get_tradingview_analysis
+from utils.price import get_current_price
+from utils.telegram import send_message_to_telegram, delete_previous_messages
+from utils.config import (
+    TOP_STOCKS, TOP_CRYPTOS, TOP_ASSETS, WALLET_STOCKS, WALLET_CRYPTOS,
+    DEFAULT_STOP_LOSS, DEFAULT_RISK_REWARD_RATIO, SCHEDULED_TIMES
+)
+from utils.rate_limiter import rate_limited
+from utils.cache import PersistentCache
 
 # -----------------------------------------------------------------------------
 # Load environment variables from .env file
@@ -21,7 +35,26 @@ load_dotenv()
 # -----------------------------------------------------------------------------
 # Logging Configuration
 # -----------------------------------------------------------------------------
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+def setup_logging():
+    """Configure logging with rotation and proper formatting."""
+    log_formatter = logging.Formatter('%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s')
+    
+    # File handler with rotation
+    log_file = 'trading_bot.log'
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_file, maxBytes=5*1024*1024, backupCount=5
+    )
+    file_handler.setFormatter(log_formatter)
+    
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(log_formatter)
+    
+    # Root logger configuration
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
 
 # -----------------------------------------------------------------------------
 # Bot Configuration (from .env)
@@ -82,7 +115,7 @@ WALLET_CRYPTOS = ["BTC", "DEGEN","JUP", "PEPE", "WIF", "XRP"]
 # -----------------------------------------------------------------------------
 # Global Cache for TradingView Analysis (for improved performance)
 # -----------------------------------------------------------------------------
-analysis_cache = {}
+analysis_cache = PersistentCache(cache_file="analysis_cache.json", expiry_seconds=3600)
 
 # -----------------------------------------------------------------------------
 # Helper: Recommendation Priority (for secondary sorting)
@@ -140,14 +173,19 @@ def detect_stock_exchange(symbol: str):
             logging.debug(f"Exchange {exchange} test failed for {symbol}: {e}")
     return None, None
 
+@rate_limited(calls_per_second=2)  # Limit to 2 calls per second
 def get_tradingview_analysis(symbol: str, exchange: str, screener: str, interval=Interval.INTERVAL_1_DAY) -> dict:
     """
     Retrieve TradingView analysis for the specified asset.
-    Uses a simple in-memory cache to reduce repeated API calls.
+    Uses a persistent cache to reduce repeated API calls.
     """
     key = (symbol.upper(), exchange, screener, interval)
-    if key in analysis_cache:
-        return analysis_cache[key]
+    
+    # Check cache first
+    cached_result = analysis_cache.get(key)
+    if cached_result:
+        return cached_result
+    
     try:
         handler = TA_Handler(
             symbol=symbol.upper(),
@@ -165,9 +203,11 @@ def get_tradingview_analysis(symbol: str, exchange: str, screener: str, interval
             "moving_averages": analysis.moving_averages.get("RECOMMENDATION", "N/A"),
             "RSI": analysis.indicators.get("RSI", 50),
             "MACD_hist": analysis.indicators.get("MACD.macd", 0) - analysis.indicators.get("MACD.signal", 0),
-            "indicators": analysis.indicators  # stored for fallback use in price fetching
+            "indicators": analysis.indicators
         }
-        analysis_cache[key] = result
+        
+        # Store in cache
+        analysis_cache.set(key, result)
         return result
     except Exception as e:
         return {"symbol": symbol.upper(), "exchange": exchange, "error": str(e)}
@@ -238,107 +278,27 @@ def get_timeframe_scores(symbol: str, exchange: str, asset_type: str):
     return short_score, mid_score, long_score
 
 # -----------------------------------------------------------------------------
-# Improved Current Price Function with Fallback
-# -----------------------------------------------------------------------------
-def get_current_price(symbol: str, asset_type: str, tv_indicators=None):
-    """
-    Fetch the latest closing price from Yahoo Finance using a daily interval.
-    If no data is returned, fall back to TradingView's "close" price from tv_indicators.
-    """
-    try:
-        # Determine the Yahoo Finance symbol.
-        if asset_type == "crypto":
-            yf_symbol = symbol.replace("USDT", "-USD")
-        else:
-            yf_symbol = symbol
-        # Always use daily data.
-        data = yf.download(yf_symbol, period="1d", interval="1d", progress=False)
-        if not data.empty and 'Close' in data.columns:
-            price = float(data['Close'].iloc[-1])
-            return price
-        logging.warning(f"No current price found for {yf_symbol} on Yahoo Finance.")
-        # Fallback: use TradingView's close if available.
-        if tv_indicators:
-            tv_close = tv_indicators.get("close")
-            if tv_close is not None:
-                logging.info(f"Using TradingView close price as fallback for {yf_symbol}.")
-                return float(tv_close)
-        return None
-    except Exception as e:
-        logging.error(f"Error fetching current price for {yf_symbol}: {e}")
-        return None
-
-# -----------------------------------------------------------------------------
 # Main Analysis Function (includes wallet assets and multi-timeframe evaluation)
 # -----------------------------------------------------------------------------
 def analyze_assets():
     stock_results = []
     crypto_results = []
 
-    # Process TOP_ASSETS
-    for asset in TOP_ASSETS:
-        asset_type = detect_asset_type(asset)
-        if asset_type == "crypto":
-            symbol, exchange = detect_crypto_exchange(asset)
-            if not symbol:
-                logging.warning(f"Skipping {asset}: Not found on supported crypto exchanges.")
-                continue
-        else:
-            symbol, exchange = detect_stock_exchange(asset)
-            if not symbol:
-                logging.warning(f"Skipping {asset}: Not found on supported stock exchanges.")
-                continue
-
-        # Get daily and weekly analysis
-        daily_analysis = get_tradingview_analysis(symbol, exchange, asset_type, interval=Interval.INTERVAL_1_DAY)
-        if "error" in daily_analysis:
-            logging.error(f"Error fetching daily analysis for {asset}: {daily_analysis['error']}")
-            continue
-
-        weekly_analysis = get_tradingview_analysis(symbol, exchange, asset_type, interval=Interval.INTERVAL_1_WEEK)
-        if "error" in weekly_analysis:
-            logging.warning(f"Weekly analysis not available for {asset}. Using daily analysis only.")
-            weekly_analysis = None
-
-        # Compute overall score
-        score = evaluate_asset(daily_analysis, weekly_analysis)
-        rec = daily_analysis.get("recommendation", "N/A")
-        rec_prio = rec_priority(rec)
-        logging.info(f"Asset {asset}: Daily Recommendation: {rec}, Score: {score}")
-
-        # Get multi-timeframe scores
-        short_prob, mid_prob, long_prob = get_timeframe_scores(symbol, exchange, asset_type)
-        horizons = {"Short": short_prob, "Mid": mid_prob, "Long": long_prob}
-        recommended_horizon = max(horizons, key=horizons.get)
-
-        # Prepare asset data dictionary.
-        # Note: 'Indicators' are saved to be used as fallback for price fetching.
-        data = {
-            "Symbol": daily_analysis["symbol"],
-            "Exchange": daily_analysis["exchange"],
-            "Daily Recommendation": rec,
-            "Weekly Recommendation": weekly_analysis["recommendation"] if weekly_analysis else "N/A",
-            "RSI": daily_analysis["RSI"],
-            "MACD_Hist": daily_analysis["MACD_hist"],
-            "Score": score,
-            "RecPriority": rec_prio,
-            "Predicted Price": None,    # Removed linear regression prediction.
-            "Current Price": None,
-            "Model Accuracy": None,     # Removed model metrics.
-            "Take Profit": None,
-            "ATR": daily_analysis.get("indicators", {}).get("ATR", None),
-            "Asset_Type": asset_type,
-            "Source": "Top",
-            "Short Probability": short_prob,
-            "Mid Probability": mid_prob,
-            "Long Probability": long_prob,
-            "Recommended Horizon": recommended_horizon,
-            "Indicators": daily_analysis.get("indicators")
-        }
-        if asset_type == "crypto":
-            crypto_results.append(data)
-        else:
-            stock_results.append(data)
+    # Process assets in parallel
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        # Process TOP_ASSETS
+        futures = []
+        for asset in TOP_ASSETS:
+            futures.append(executor.submit(analyze_single_asset, asset))
+        
+        # Collect results
+        for future in concurrent.futures.as_completed(futures):
+            result = future.result()
+            if result:
+                if result["Asset_Type"] == "crypto":
+                    crypto_results.append(result)
+                else:
+                    stock_results.append(result)
 
     # Build DataFrames and sort by Score (highest first)
     df_stocks = pd.DataFrame(stock_results)
@@ -425,6 +385,82 @@ def analyze_assets():
 
     return best_stocks, top_stocks, best_cryptos, top_cryptos, wallet_stocks_df, wallet_cryptos_df
 
+def analyze_single_asset(asset):
+    asset_type = detect_asset_type(asset)
+    if asset_type == "crypto":
+        symbol, exchange = detect_crypto_exchange(asset)
+        if not symbol:
+            logging.warning(f"Skipping {asset}: Not found on supported crypto exchanges.")
+            return None
+    else:
+        symbol, exchange = detect_stock_exchange(asset)
+        if not symbol:
+            logging.warning(f"Skipping {asset}: Not found on supported stock exchanges.")
+            return None
+
+    # Get daily and weekly analysis
+    daily_analysis = get_tradingview_analysis(symbol, exchange, asset_type, interval=Interval.INTERVAL_1_DAY)
+    if "error" in daily_analysis:
+        logging.error(f"Error fetching daily analysis for {asset}: {daily_analysis['error']}")
+        return None
+
+    weekly_analysis = get_tradingview_analysis(symbol, exchange, asset_type, interval=Interval.INTERVAL_1_WEEK)
+    if "error" in weekly_analysis:
+        logging.warning(f"Weekly analysis not available for {asset}. Using daily analysis only.")
+        weekly_analysis = None
+
+    # Compute overall score
+    score = evaluate_asset(daily_analysis, weekly_analysis)
+    rec = daily_analysis.get("recommendation", "N/A")
+    rec_prio = rec_priority(rec)
+    logging.info(f"Asset {asset}: Daily Recommendation: {rec}, Score: {score}")
+
+    # Get multi-timeframe scores
+    short_prob, mid_prob, long_prob = get_timeframe_scores(symbol, exchange, asset_type)
+    horizons = {"Short": short_prob, "Mid": mid_prob, "Long": long_prob}
+    recommended_horizon = max(horizons, key=horizons.get)
+
+    # Prepare asset data dictionary.
+    # Note: 'Indicators' are saved to be used as fallback for price fetching.
+    data = {
+        "Symbol": daily_analysis["symbol"],
+        "Exchange": daily_analysis["exchange"],
+        "Daily Recommendation": rec,
+        "Weekly Recommendation": weekly_analysis["recommendation"] if weekly_analysis else "N/A",
+        "RSI": daily_analysis["RSI"],
+        "MACD_Hist": daily_analysis["MACD_hist"],
+        "Score": score,
+        "RecPriority": rec_prio,
+        "Predicted Price": None,    # Removed linear regression prediction.
+        "Current Price": None,
+        "Model Accuracy": None,     # Removed model metrics.
+        "Take Profit": None,
+        "ATR": daily_analysis.get("indicators", {}).get("ATR", None),
+        "Asset_Type": asset_type,
+        "Source": "Top",
+        "Short Probability": short_prob,
+        "Mid Probability": mid_prob,
+        "Long Probability": long_prob,
+        "Recommended Horizon": recommended_horizon,
+        "Indicators": daily_analysis.get("indicators")
+    }
+    if asset_type == "crypto":
+        data["Exchange"], data["Symbol"] = symbol, symbol.upper()
+    else:
+        data["Exchange"], data["Symbol"] = exchange, symbol
+
+    # Update current price and take profit
+    current_price = get_current_price(symbol, asset_type, tv_indicators=data["Indicators"])
+    data["Current Price"] = current_price
+    if current_price is not None:
+        if data.get("ATR") is not None:
+            tp = calculate_take_profit_atr(current_price, data["ATR"], atr_stop_loss_multiplier=1.5, risk_reward_ratio=2.0)
+        else:
+            tp = calculate_take_profit(current_price, DEFAULT_STOP_LOSS, DEFAULT_RISK_REWARD_RATIO)
+        data["Take Profit"] = tp
+
+    return data
+
 # -----------------------------------------------------------------------------
 # Telegram Messaging Function
 # -----------------------------------------------------------------------------
@@ -488,115 +524,143 @@ async def send_message_to_telegram(text: str, delete_old: bool = False):
 # Scheduled Job: Build and Send the Message
 # -----------------------------------------------------------------------------
 def daily_job():
-    logging.info("Starting daily analysis job...")
-    best_stocks, top_stocks, best_cryptos, top_cryptos, wallet_stocks, wallet_cryptos = analyze_assets()
-
-    main_lines = [
-        "📊 Daily Market Analysis 📊",
-        "----------------------------------------",
-        ""
-    ]
-    # --- Best Picks Section ---
-    main_lines.append("🔥 Best Stock Picks (Top 5) 🔥")
-    main_lines.append("")
-    if not best_stocks.empty:
-        for _, row in best_stocks.iterrows():
-            symbol = row["Symbol"]
-            rec = row["Daily Recommendation"]
-            curr = row["Current Price"] or 0
-            tp = row["Take Profit"] or 0
-            score = row["Score"]
-            probabilities = f"Short: {row['Short Probability']}% | Mid: {row['Mid Probability']}% | Long: {row['Long Probability']}%"
-            rec_horizon = row["Recommended Horizon"]
-            line = (f"• {symbol}: `Rec={rec}` | 📈 `Curr=${curr:,.2f}` | 🎯 `TP=${tp:,.2f}` | `Score={score}`\n"
-                    f"   ➜ {probabilities} | Recommended: {rec_horizon}-term")
-            main_lines.append(line)
-            main_lines.append("")
-    else:
-        main_lines.append("No bullish stocks found. 😔")
+    try:
+        logging.info("Starting daily analysis job...")
+        best_stocks, top_stocks, best_cryptos, top_cryptos, wallet_stocks, wallet_cryptos = analyze_assets()
+        
+        main_lines = [
+            "📊 Daily Market Analysis 📊",
+            "----------------------------------------",
+            ""
+        ]
+        # --- Best Picks Section ---
+        main_lines.append("🔥 Best Stock Picks (Top 5) 🔥")
         main_lines.append("")
-
-    main_lines.append("🏢 Other Top Stocks")
-    main_lines.append("")
-    if not top_stocks.empty:
-        for _, row in top_stocks.iterrows():
-            if row["Symbol"] in best_stocks["Symbol"].values:
-                continue
-            symbol = row["Symbol"]
-            rec = row["Daily Recommendation"]
-            curr = row["Current Price"] or 0
-            tp = row["Take Profit"] or 0
-            score = row["Score"]
-            probabilities = f"Short: {row['Short Probability']}% | Mid: {row['Mid Probability']}% | Long: {row['Long Probability']}%"
-            rec_horizon = row["Recommended Horizon"]
-            line = (f"• {symbol}: `Rec={rec}` | 📈 `Curr=${curr:,.2f}` | 🎯 `TP=${tp:,.2f}` | `Score={score}`\n"
-                    f"   ➜ {probabilities} | Recommended: {rec_horizon}-term")
-            main_lines.append(line)
+        if not best_stocks.empty:
+            for _, row in best_stocks.iterrows():
+                try:
+                    line = format_asset_line(row)
+                    main_lines.append(line)
+                    main_lines.append("")
+                except Exception as e:
+                    logging.error(f"Error formatting stock {row.get('Symbol', 'unknown')}: {e}")
+                    main_lines.append(f"• {row.get('Symbol', 'unknown')}: Error displaying data")
+                    main_lines.append("")
+        else:
+            main_lines.append("No bullish stocks found. 😔")
             main_lines.append("")
-    else:
-        main_lines.append("No additional bullish stocks found. 😔")
-        main_lines.append("")
 
-    main_lines.append("🔥 Best Crypto Picks (Top 5) 🔥")
-    main_lines.append("")
-    if not best_cryptos.empty:
-        for _, row in best_cryptos.iterrows():
-            symbol = row["Symbol"]
-            rec = row["Daily Recommendation"]
-            curr = row["Current Price"] or 0
-            tp = row["Take Profit"] or 0
-            score = row["Score"]
-            probabilities = f"Short: {row['Short Probability']}% | Mid: {row['Mid Probability']}% | Long: {row['Long Probability']}%"
-            rec_horizon = row["Recommended Horizon"]
-            line = (f"• {symbol}: `Rec={rec}` | 📈 `Curr=${curr:,.2f}` | 🎯 `TP=${tp:,.2f}` | `Score={score}`\n"
-                    f"   ➜ {probabilities} | Recommended: {rec_horizon}-term")
-            main_lines.append(line)
+        main_lines.append("🏢 Other Top Stocks")
+        main_lines.append("")
+        if not top_stocks.empty:
+            for _, row in top_stocks.iterrows():
+                if row["Symbol"] in best_stocks["Symbol"].values:
+                    continue
+                try:
+                    line = format_asset_line(row)
+                    main_lines.append(line)
+                    main_lines.append("")
+                except Exception as e:
+                    logging.error(f"Error formatting stock {row.get('Symbol', 'unknown')}: {e}")
+                    main_lines.append(f"• {row.get('Symbol', 'unknown')}: Error displaying data")
+                    main_lines.append("")
+        else:
+            main_lines.append("No additional bullish stocks found. 😔")
             main_lines.append("")
-    else:
-        main_lines.append("No bullish cryptos found. 😔")
+
+        main_lines.append("🔥 Best Crypto Picks (Top 5) 🔥")
         main_lines.append("")
+        if not best_cryptos.empty:
+            for _, row in best_cryptos.iterrows():
+                try:
+                    line = format_asset_line(row)
+                    main_lines.append(line)
+                    main_lines.append("")
+                except Exception as e:
+                    logging.error(f"Error formatting crypto {row.get('Symbol', 'unknown')}: {e}")
+                    main_lines.append(f"• {row.get('Symbol', 'unknown')}: Error displaying data")
+                    main_lines.append("")
+        else:
+            main_lines.append("No bullish cryptos found. 😔")
+            main_lines.append("")
 
-    main_message = "\n".join(main_lines)
+        main_message = "\n".join(main_lines)
 
-    wallet_lines = []
-    wallet_lines.append("👜 My Stocks Wallet")
-    wallet_lines.append("")
-    if not wallet_stocks.empty:
-        for _, row in wallet_stocks.iterrows():
-            symbol = row["Symbol"]
-            rec = row["Daily Recommendation"]
-            curr = row["Current Price"] or 0
-            line = f"• {symbol}: `Rec={rec}` | 📈 `Curr=${curr:,.2f}`"
-            wallet_lines.append(line)
-            wallet_lines.append("")
-    else:
-        wallet_lines.append("No wallet stocks data available. 😔")
+        wallet_lines = []
+        wallet_lines.append("👜 My Stocks Wallet")
         wallet_lines.append("")
-
-    wallet_lines.append("👜 My Cryptos Wallet")
-    wallet_lines.append("")
-    if not wallet_cryptos.empty:
-        for _, row in wallet_cryptos.iterrows():
-            symbol = row["Symbol"]
-            rec = row["Daily Recommendation"]
-            curr = row["Current Price"] or 0
-            line = f"• {symbol}: `Rec={rec}` | 📈 `Curr=${curr:,.2f}`"
-            wallet_lines.append(line)
+        if not wallet_stocks.empty:
+            for _, row in wallet_stocks.iterrows():
+                try:
+                    line = format_asset_line(row)
+                    wallet_lines.append(line)
+                    wallet_lines.append("")
+                except Exception as e:
+                    logging.error(f"Error formatting wallet stock {row.get('Symbol', 'unknown')}: {e}")
+                    wallet_lines.append(f"• {row.get('Symbol', 'unknown')}: Error displaying data")
+                    wallet_lines.append("")
+        else:
+            wallet_lines.append("No wallet stocks data available. 😔")
             wallet_lines.append("")
-    else:
-        wallet_lines.append("No wallet cryptos data available. 😔")
+
+        wallet_lines.append("👜 My Cryptos Wallet")
         wallet_lines.append("")
+        if not wallet_cryptos.empty:
+            for _, row in wallet_cryptos.iterrows():
+                try:
+                    line = format_asset_line(row)
+                    wallet_lines.append(line)
+                    wallet_lines.append("")
+                except Exception as e:
+                    logging.error(f"Error formatting wallet crypto {row.get('Symbol', 'unknown')}: {e}")
+                    wallet_lines.append(f"• {row.get('Symbol', 'unknown')}: Error displaying data")
+                    wallet_lines.append("")
+        else:
+            wallet_lines.append("No wallet cryptos data available. 😔")
+            wallet_lines.append("")
 
-    wallet_message = "\n".join(wallet_lines)
+        wallet_message = "\n".join(wallet_lines)
 
-    asyncio.run(send_message_to_telegram(main_message, delete_old=True))
-    asyncio.run(send_message_to_telegram(wallet_message, delete_old=False))
-    logging.info("Daily analysis job completed and messages sent.")
+        asyncio.run(send_message_to_telegram(main_message, delete_old=True))
+        asyncio.run(send_message_to_telegram(wallet_message, delete_old=False))
+        logging.info("Daily analysis job completed and messages sent.")
+    except Exception as e:
+        error_message = f"❌ Error in daily analysis job: {str(e)}"
+        logging.error(error_message, exc_info=True)  # Add exc_info to get the full traceback
+        asyncio.run(send_message_to_telegram(error_message, delete_old=False))
 
-# -----------------------------------------------------------------------------
-# Main Scheduler
-# -----------------------------------------------------------------------------
+def format_asset_line(row):
+    """Format a single asset line for the Telegram message."""
+    symbol = row.get("Symbol", "Unknown")
+    rec = row.get("Daily Recommendation", "N/A")
+    curr = row.get("Current Price", 0) or 0
+    
+    # Basic line for all assets
+    line = f"• {symbol}: `Rec={rec}` | 📈 `Curr=${curr:,.2f}`"
+    
+    # Add take profit and score for top assets
+    if "Score" in row:
+        score = row.get("Score", "N/A")
+        tp = row.get("Take Profit", 0) or 0
+        line += f" | 🎯 `TP=${tp:,.2f}` | `Score={score}`"
+        
+        # Add probability info for top assets
+        if all(k in row for k in ["Short Probability", "Mid Probability", "Long Probability"]):
+            probabilities = f"Short: {row['Short Probability']}% | Mid: {row['Mid Probability']}% | Long: {row['Long Probability']}%"
+            rec_horizon = row.get("Recommended Horizon", "N/A")
+            line += f"\n   ➜ {probabilities} | Recommended: {rec_horizon}-term"
+    
+    return line
+
+def signal_handler(sig, frame):
+    """Handle termination signals gracefully."""
+    logging.info("Received termination signal. Shutting down...")
+    scheduler.shutdown()
+    logging.info("Scheduler shutdown complete.")
+    sys.exit(0)
+
 if __name__ == '__main__':
+    setup_logging()
     # -----------------------------------------------------------------------------
     # APScheduler Setup
     # -----------------------------------------------------------------------------
@@ -614,14 +678,21 @@ if __name__ == '__main__':
             coalesce=True           # If multiple runs are missed, only one execution occurs.
         )
         logging.info("Scheduled daily_job at %s", t)
-
+    
+    daily_job()
     scheduler.start()
     logging.info("Scheduler started.")
 
+    # Register signal handlers
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     try:
         # Keep the main thread alive.
         while True:
             time.sleep(60)
-    except (KeyboardInterrupt, SystemExit):
+    except Exception as e:
+        logging.error(f"Unexpected error in main loop: {e}")
         scheduler.shutdown()
-        logging.info("Scheduler shutdown.")
+        logging.info("Scheduler shutdown due to error.")
+        sys.exit(1)
