@@ -2,9 +2,12 @@ version: "3.8"
 
 services:
   trading-app:
-    build: .
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
     ports:
       - "5001:5001"
+      - "3000:3000" # For direct frontend access
     environment:
       - NODE_ENV=production
       - FLASK_ENV=development # Set to development to bypass authentication
@@ -18,7 +21,8 @@ services:
       - EMAIL_RECIPIENT=${EMAIL_RECIPIENT}
     volumes:
       # For persistent data
-      - ./data:/app/data
+      - ../backend/data:/app/backend/data
+      - ../backend/logs:/app/backend/logs
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5001/api/health"]
       interval: 30s

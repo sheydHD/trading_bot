@@ -4,12 +4,15 @@ import pandas as pd
 import asyncio
 import time
 import json
-from dotenv import load_dotenv
+import sys
 import concurrent.futures
 import logging.handlers
 import signal
-import sys
 
+# Add the parent directory to the path to import modules from backend
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from dotenv import load_dotenv
 import yfinance as yf
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -31,7 +34,25 @@ from utils.email import send_email
 # -----------------------------------------------------------------------------
 # Load environment variables from .env file
 # -----------------------------------------------------------------------------
-load_dotenv()
+CONFIG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config')
+ENV_FILE = os.path.join(CONFIG_DIR, '.env')
+load_dotenv(ENV_FILE)
+
+# -----------------------------------------------------------------------------
+# Define paths for logs and cache
+# -----------------------------------------------------------------------------
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LOG_DIR = os.path.join(BASE_DIR, 'logs')
+CACHE_DIR = os.path.join(BASE_DIR, 'data', 'cache')
+
+# Create directories if they don't exist
+os.makedirs(LOG_DIR, exist_ok=True)
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+# File paths
+LOG_FILE = os.path.join(LOG_DIR, 'trading_bot.log')
+TELEGRAM_MESSAGES_FILE = os.path.join(CACHE_DIR, 'telegram_messages.json')
+ANALYSIS_CACHE_FILE = os.path.join(CACHE_DIR, 'analysis_cache.json')
 
 # -----------------------------------------------------------------------------
 # Logging Configuration
@@ -41,9 +62,8 @@ def setup_logging():
     log_formatter = logging.Formatter('%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s')
     
     # File handler with rotation
-    log_file = 'trading_bot.log'
     file_handler = logging.handlers.RotatingFileHandler(
-        log_file, maxBytes=5*1024*1024, backupCount=5
+        LOG_FILE, maxBytes=5*1024*1024, backupCount=5
     )
     file_handler.setFormatter(log_formatter)
     
@@ -607,26 +627,19 @@ def analyze_single_asset(asset):
 MESSAGE_LOG_FILE = "telegram_messages.json"
 
 def save_message_id(message_id):
-    try:
-        if os.path.exists(MESSAGE_LOG_FILE):
-            with open(MESSAGE_LOG_FILE, "r") as f:
-                data = json.load(f)
-        else:
-            data = []
-        data.append(message_id)
-        with open(MESSAGE_LOG_FILE, "w") as f:
-            json.dump(data, f)
-    except Exception as e:
-        logging.error(f"Error saving message ID: {e}")
+    """Save the Telegram message ID to a JSON file."""
+    message_ids = load_message_ids()
+    message_ids.append(message_id)
+    
+    with open(TELEGRAM_MESSAGES_FILE, 'w') as f:
+        json.dump(message_ids, f)
 
 def load_message_ids():
+    """Load the saved Telegram message IDs from a JSON file."""
     try:
-        if os.path.exists(MESSAGE_LOG_FILE):
-            with open(MESSAGE_LOG_FILE, "r") as f:
-                return json.load(f)
-        return []
-    except Exception as e:
-        logging.error(f"Error loading message IDs: {e}")
+        with open(TELEGRAM_MESSAGES_FILE, 'r') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
         return []
 
 async def delete_previous_messages():
@@ -638,7 +651,7 @@ async def delete_previous_messages():
             await asyncio.sleep(0.5)
         except Exception as e:
             logging.warning(f"Could not delete message {msg_id}: {e}")
-    with open(MESSAGE_LOG_FILE, "w") as f:
+    with open(TELEGRAM_MESSAGES_FILE, "w") as f:
         json.dump([], f)
 
 async def send_message_to_telegram(text: str, delete_old: bool = False):

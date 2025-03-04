@@ -13,8 +13,8 @@ This repository contains a Python-based AI trading chatbot that provides **techn
 
 1. [Features](#features)
 2. [Prerequisites](#prerequisites)
-3. [Installation and Setup](#installation-and-setup)
-4. [Directory Structure](#directory-structure)
+3. [Project Structure](#project-structure)
+4. [Installation and Setup](#installation-and-setup)
 5. [Environment Variables](#environment-variables)
 6. [Running the Bot](#running-the-bot)
 7. [Configuring the Scheduler](#configuring-the-scheduler)
@@ -44,10 +44,65 @@ Make sure you have the following tools installed:
 - Pip (Python package manager)
 - A [Telegram Bot](https://core.telegram.org/bots#6-botfather) with an active bot token
 - [TradingView](https://tradingview.com) account (for the `tradingview_ta` library)
+- Node.js and npm (for the frontend)
 
 ---
 
-## 3. Installation and Setup
+## 3. Project Structure
+
+The project has been organized into a clean, modular structure:
+
+```
+.
+├── backend/                # Backend Python code
+│   ├── api/                # API endpoints
+│   ├── config/             # Configuration files (.env, requirements)
+│   ├── core/               # Core application files
+│   ├── data/               # Data storage
+│   │   └── cache/          # Cache files (JSON)
+│   ├── logs/               # Log files
+│   └── utils/              # Utility modules
+│       ├── analysis.py     # Technical analysis functions
+│       ├── cache.py        # Caching utilities
+│       ├── config.py       # Configuration constants
+│       ├── email.py        # Email notification utilities
+│       ├── price.py        # Price data functions
+│       ├── rate_limiter.py # Rate limiting utilities
+│       └── telegram.py     # Telegram bot utilities
+│
+├── docker/                 # Docker configuration
+│   ├── Dockerfile          # Docker configuration
+│   ├── docker-compose.yml  # Docker Compose configuration
+│   ├── docker-entrypoint.sh # Docker entrypoint script
+│   └── .dockerignore       # Docker ignore file
+│
+├── frontend/               # Frontend React application
+│   ├── config/             # Frontend configuration
+│   │   ├── package.json    # NPM package definition
+│   │   ├── postcss.config.js # PostCSS configuration
+│   │   └── tailwind.config.js # Tailwind CSS configuration
+│   ├── public/             # Static assets
+│   └── src/                # React source code
+│       ├── components/     # React components
+│       ├── context/        # React context providers
+│       ├── pages/          # Page components
+│       ├── services/       # API service functions
+│       └── utils/          # Frontend utilities
+│
+├── scripts/                # Utility scripts
+│   ├── cleanup.sh          # Cleanup script for removing redundant files
+│   └── setup.sh            # Setup script for initializing the project
+│
+├── run.py                  # Entry point script
+├── setup.sh -> scripts/setup.sh        # Symlink to setup script
+├── cleanup.sh -> scripts/cleanup.sh    # Symlink to cleanup script
+├── LICENSE                 # License file
+└── README.md               # Project documentation
+```
+
+---
+
+## 4. Installation and Setup
 
 1. **Clone the Repository**:
 
@@ -56,48 +111,26 @@ Make sure you have the following tools installed:
    cd <your_repo_folder>
    ```
 
-2. **Install Requirements**:
+2. **Run the Setup Script**:
 
    ```bash
-   pip install -r requirements.txt
+   ./setup.sh
    ```
 
-   Typically, `requirements.txt` would include:
+   This script will:
 
-   ```text
-    pandas
-    tradingview-ta
-    matplotlib
-    scikit-learn
-    yfinance
-    prophet
-    requests
-    telegram
-    python-telegram-bot
-    schedule
-    python-dotenv
+   - Create necessary directories
+   - Copy environment configuration files
+   - Install Python dependencies
+   - Set up the frontend (if applicable)
+
+3. **Configure Environment Variables**:
+
+   Edit the environment file with your API keys and configuration:
+
+   ```bash
+   nano backend/config/.env
    ```
-
-   _(Adjust package versions as needed.)_
-
-3. **Create a `.env` File**:
-
-   Create an `.env` file in the root of your project to store environment variables (see [Environment Variables](#environment-variables)).
-
----
-
-## 4. Directory Structure
-
-```bash
-.
-├── main.py                # Or whichever name you use for the entry point script
-├── telegram_messages.json  # JSON file storing Telegram message IDs
-├── .env                   # Environment variables file (not committed)
-├── requirements.txt       # Python dependencies
-└── README.md              # This file
-```
-
-_(You can adjust as needed for your project.)_
 
 ---
 
@@ -108,44 +141,44 @@ _(You can adjust as needed for your project.)_
 | `TELEGRAM_BOT_TOKEN` | string  | Your Telegram bot token obtained from BotFather          |
 | `TELEGRAM_CHAT_ID`   | integer | The chat ID (or channel ID) where the bot sends messages |
 
-**Example `.env` File:**
+The environment variables are stored in:
 
-```ini
-TELEGRAM_BOT_TOKEN=123456789:ABCDEFGHIJKLMNOPQRSTUV
-TELEGRAM_CHAT_ID=123456789
-```
+- `backend/config/.env` for development
+- `backend/config/.env.production` for production
 
-> **Note**: Keep this file secret and avoid committing it to version control.
+> **Note**: Keep these files secret and avoid committing them to version control.
 
 ---
 
 ## 6. Running the Bot
 
-Run the script (e.g., `main.py`) directly:
+Run the backend script:
 
 ```bash
-python main.py
+./run.py
 ```
 
-By default, the script contains a `main()` function that:
+For the frontend (if applicable):
 
-1. Schedules tasks (analysis, reporting) at specific times (e.g., 08:00 and 16:00).
-2. Invokes `daily_job()` immediately for an optional immediate run.
-3. (Commented out) Continues scheduling in a `while True` loop.
+```bash
+cd frontend
+npm start
+```
 
-If you want the bot to continuously run, make sure you uncomment the `while True:` block:
+### Using Docker (optional)
 
-```python
-while True:
-    schedule.run_pending()
-    time.sleep(60)
+To run the application with Docker:
+
+```bash
+cd docker
+docker-compose up
 ```
 
 ---
 
 ## 7. Configuring the Scheduler
 
-Currently, the code schedules tasks at 08:00 and 16:00 by default:
+The scheduler configuration is in `backend/core/main.py`. By default, it schedules tasks at 08:00 and 16:00:
 
 ```python
 schedule.every().day.at("08:00").do(daily_job)
@@ -192,7 +225,7 @@ For more scheduling options, refer to the [schedule library docs](https://github
 
 ## 10. Logging
 
-The bot uses Python’s built-in `logging` module:
+The bot uses Python's built-in `logging` module:
 
 ```python
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')

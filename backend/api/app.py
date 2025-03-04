@@ -10,23 +10,39 @@ from dotenv import load_dotenv
 import pandas as pd
 import time
 
-# Add the parent directory to the Python path to find the utils module
+# Add the parent directory to the Python path to find modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Import necessary utilities from your existing application
+# Import necessary utilities from backends
 from utils.analysis import analyze_assets, fetch_stock_data, fetch_crypto_data, analyze_data
 from utils.cache import PersistentCache
 
 # Import your main analysis function
-from main import analyze_assets as main_analyze_assets
+# Update this import to use the correct module path
+from core.main import analyze_assets as main_analyze_assets
 
 # Load environment variables
 load_dotenv()
 
-# Initialize Flask app
-app = Flask(__name__, static_folder=os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'build')))
-app.static_url_path = ''
-CORS(app, supports_credentials=True)  # Enable CORS for all routes with credentials support
+# Get the location of frontend build files
+BUILD_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'build'))
+if not os.path.exists(BUILD_DIR):
+    # Fallback to Docker environment where build is at the app root
+    BUILD_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '..', 'build'))
+    if not os.path.exists(BUILD_DIR):
+        print(f"WARNING: Build directory not found at {BUILD_DIR}. Trying root app directory...")
+        BUILD_DIR = os.path.abspath('/app/build')
+
+# Initialize Flask app with the appropriate static folder
+app = Flask(__name__, static_folder=BUILD_DIR)
+CORS(app, supports_credentials=True)  # Enable CORS for all routes
+
+print(f"Static folder set to: {BUILD_DIR}")
+print(f"Static folder exists: {os.path.exists(BUILD_DIR)}")
+if os.path.exists(BUILD_DIR):
+    print(f"Build directory contents: {os.listdir(BUILD_DIR)}")
+else:
+    print("WARNING: Build directory does not exist. Frontend will not be served correctly!")
 
 # Authentication (Simple API key for demonstration)
 API_KEY = os.getenv("API_KEY", "your-secret-api-key")
@@ -34,8 +50,14 @@ API_KEY = os.getenv("API_KEY", "your-secret-api-key")
 # Storage for analysis history
 analysis_history = []
 
-# Create a more robust cache that persists across restarts
-analysis_cache_file = "analysis_cache.json" 
+# Set up cache file in the appropriate location
+if os.path.exists('/app/backend/data'):
+    analysis_cache_file = "/app/backend/data/cache/analysis_cache.json"
+else:
+    analysis_cache_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "cache", "analysis_cache.json")
+
+# Ensure directory exists
+os.makedirs(os.path.dirname(analysis_cache_file), exist_ok=True)
 
 # Load existing cache data if it exists
 if os.path.exists(analysis_cache_file):
@@ -49,6 +71,7 @@ if os.path.exists(analysis_cache_file):
         analysis_cache = PersistentCache(cache_file=analysis_cache_file)
 else:
     analysis_cache = PersistentCache(cache_file=analysis_cache_file)
+    print(f"Created new analysis cache at {analysis_cache_file}")
 
 # Global variables to track analysis status
 analysis_status = {
@@ -59,9 +82,6 @@ analysis_status = {
     "current_step_name": "",
     "logs": []
 }
-
-# Define the build directory path
-BUILD_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'build'))
 
 def authenticate(request):
     """Simple API key authentication."""
@@ -307,14 +327,14 @@ def health_check():
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def serve(path):
-    # First, check if it's a file in the static folder (JS, CSS, etc.)
-    static_path = os.path.join(BUILD_DIR, path)
-    if path and os.path.isfile(static_path):
-        print(f"Serving static file: {static_path}")
+    """Serve frontend static files or fall back to index.html for SPA routing"""
+    if path != "" and os.path.exists(os.path.join(BUILD_DIR, path)):
+        # Serve static files directly if they exist
+        print(f"Serving static file: {path}")
         return send_from_directory(BUILD_DIR, path)
-        
-    # If it's not a static file, serve index.html
-    print(f"Serving index.html instead of: {path}")
+    
+    # For any other route, serve the index.html to enable SPA routing
+    print(f"Requested path: {path}, serving index.html (SPA routing)")
     return send_from_directory(BUILD_DIR, 'index.html')
 
 # Before the app.run() line, add this for debugging

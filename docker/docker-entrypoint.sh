@@ -2,7 +2,7 @@
 set -e
 
 # Create necessary directories
-mkdir -p /app/data
+mkdir -p /app/backend/data/cache /app/backend/logs
 
 # Ensure environment variables are set in Flask environment
 export FLASK_ENV=${FLASK_ENV:-development}
@@ -10,9 +10,12 @@ export API_KEY=${API_KEY:-your-secret-api-key}
 export REACT_APP_API_KEY=${REACT_APP_API_KEY:-your-secret-api-key}
 
 # Load all environment variables from .env file if it exists
-if [ -f .env ]; then
-  export $(cat .env | grep -v '#' | xargs)
-  echo "Loaded environment variables from .env file"
+if [ -f backend/config/.env ]; then
+  export $(cat backend/config/.env | grep -v '#' | xargs)
+  echo "Loaded environment variables from backend/config/.env file"
+elif [ -f backend/config/.env.production ]; then
+  export $(cat backend/config/.env.production | grep -v '#' | xargs)
+  echo "Loaded environment variables from backend/config/.env.production file"
 fi
 
 # Print debug info
@@ -36,5 +39,5 @@ else
   echo "Email notifications: DISABLED"
 fi
 
-# Execute the given command (typically the Flask app)
+# Execute the given command (typically the main application)
 exec "$@" 
