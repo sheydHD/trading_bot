@@ -6,10 +6,7 @@ function Header() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const location = useLocation();
 
-  const navigation = [
-    { name: "Dashboard", href: "/" },
-    { name: "History", href: "/history" },
-  ];
+  const navigation = [{ name: "Dashboard", href: "/" }];
 
   const isActive = (path) => {
     return location.pathname === path;

@@ -265,7 +265,7 @@ function Dashboard() {
           {/* Top Picks Section */}
           <section>
             <h2 className="text-xl font-semibold text-gray-700 mb-4">
-              🔥 Best Stock Picks (Top 5)
+              🔥 Best Stock Picks (Top 6)
             </h2>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {analysis.best_stocks && analysis.best_stocks.length > 0 ? (
@@ -303,7 +303,7 @@ function Dashboard() {
           {/* Best Cryptos Section */}
           <section>
             <h2 className="text-xl font-semibold text-gray-700 mb-4">
-              🔥 Best Crypto Picks (Top 5)
+              🔥 Best Crypto Picks (Top 6)
             </h2>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {analysis.best_cryptos && analysis.best_cryptos.length > 0 ? (
@@ -344,49 +344,7 @@ function Dashboard() {
               />
             </div>
           </section>
-
-          {/* Debug Data Display (temporary) */}
-          <section className="mt-4 p-4 bg-gray-100 rounded-md">
-            <h3 className="text-lg font-medium mb-2">Debug Data Counts</h3>
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <p>
-                  <strong>Best Stocks:</strong>{" "}
-                  {analysis?.best_stocks?.length || 0}
-                </p>
-                <p>
-                  <strong>Top Stocks:</strong>{" "}
-                  {analysis?.top_stocks?.length || 0}
-                </p>
-                <p>
-                  <strong>Best Cryptos:</strong>{" "}
-                  {analysis?.best_cryptos?.length || 0}
-                </p>
-              </div>
-              <div>
-                <p>
-                  <strong>Top Cryptos:</strong>{" "}
-                  {analysis?.top_cryptos?.length || 0}
-                </p>
-                <p>
-                  <strong>Wallet Stocks:</strong>{" "}
-                  {analysis?.wallet_stocks?.length || 0}
-                </p>
-                <p>
-                  <strong>Wallet Cryptos:</strong>{" "}
-                  {analysis?.wallet_cryptos?.length || 0}
-                </p>
-              </div>
-            </div>
-          </section>
         </div>
-      )}
-
-      {process.env.NODE_ENV === "development" && (
-        <>
-          <RawDataDisplay data={analysis} title="Analysis Data" />
-          <DebugPanel onRefresh={fetchAnalysis} />
-        </>
       )}
     </div>
   );

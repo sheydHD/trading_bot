@@ -325,8 +325,8 @@ def analyze_assets(send_messages=False):
 
     top_stocks = df_stocks_filtered.head(10).copy()
     top_cryptos = df_cryptos_filtered.head(10).copy()
-    best_stocks = top_stocks.head(5)
-    best_cryptos = top_cryptos.head(5)
+    best_stocks = top_stocks.head(6)
+    best_cryptos = top_cryptos.head(6)
 
     # Update top assets with current price and take profit calculations.
     for idx, row in top_stocks.iterrows():
@@ -405,8 +405,6 @@ def analyze_assets(send_messages=False):
     top_stocks_df = pd.DataFrame(top_stocks)
     best_cryptos_df = pd.DataFrame(best_cryptos) if not best_cryptos.empty else pd.DataFrame()
     top_cryptos_df = pd.DataFrame(top_cryptos)
-    wallet_stocks_df = pd.DataFrame(wallet_stocks_list).sort_values(by="RecPriority", ascending=True)
-    wallet_cryptos_df = pd.DataFrame(wallet_cryptos_list).sort_values(by="RecPriority", ascending=True)
     
     # Format messages for Telegram and email
     main_lines = []
@@ -414,7 +412,7 @@ def analyze_assets(send_messages=False):
     main_lines.append("")
 
     # Add best stocks
-    main_lines.append("🔥 Best Stock Picks (Top 5) 🔥")
+    main_lines.append("🔥 Best Stock Picks (Top 6) 🔥")
     main_lines.append("")
     if not best_stocks_df.empty:
         for _, row in best_stocks_df.iterrows():
@@ -431,7 +429,7 @@ def analyze_assets(send_messages=False):
         main_lines.append("")
 
     # Add best cryptos
-    main_lines.append("🔥 Best Crypto Picks (Top 5) 🔥")
+    main_lines.append("🔥 Best Crypto Picks (Top 6) 🔥")
     main_lines.append("")
     if not best_cryptos_df.empty:
         for _, row in best_cryptos_df.iterrows():
@@ -687,7 +685,7 @@ def daily_job():
             ""
         ]
         # --- Best Picks Section ---
-        main_lines.append("🔥 Best Stock Picks (Top 5) 🔥")
+        main_lines.append("🔥 Best Stock Picks (Top 6) 🔥")
         main_lines.append("")
         if not best_stocks.empty:
             for _, row in best_stocks.iterrows():
@@ -721,7 +719,7 @@ def daily_job():
             main_lines.append("No additional bullish stocks found. 😔")
             main_lines.append("")
 
-        main_lines.append("🔥 Best Crypto Picks (Top 5) 🔥")
+        main_lines.append("🔥 Best Crypto Picks (Top 6) 🔥")
         main_lines.append("")
         if not best_cryptos.empty:
             for _, row in best_cryptos.iterrows():

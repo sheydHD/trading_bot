@@ -3,7 +3,6 @@ import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
 import Header from "./components/Header";
 import Footer from "./components/Footer";
 import Dashboard from "./pages/Dashboard";
-import History from "./pages/History";
 import "./App.css";
 
 function App() {
@@ -14,7 +13,6 @@ function App() {
         <main className="flex-grow container mx-auto px-4 py-8">
           <Routes>
             <Route path="/" element={<Dashboard />} />
-            <Route path="/history" element={<History />} />
           </Routes>
         </main>
         <Footer />
