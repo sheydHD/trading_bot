@@ -1,0 +1,325 @@
+"""High-level analysis orchestrator.
+
+Coordinates data fetching, feature engineering, model training, scoring,
+and result assembly for both stocks and cryptocurrencies.
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+from typing import Any
+
+import numpy as np
+
+from apps.backend.prediction.features import (
+    FUNDAMENTAL_FEATURE_COLS,
+    TECHNICAL_FEATURE_COLS,
+    build_feature_matrix,
+    compute_technical_features,
+    create_target,
+    fetch_fundamentals,
+    fetch_ohlcv,
+)
+from apps.backend.prediction.model import StockPredictor
+from apps.backend.prediction.scoring import (
+    compute_fundamental_score,
+    compute_overall_score,
+    compute_technical_score,
+)
+from apps.backend.utils.config import (
+    PREDICTION_CRYPTOS,
+    PREDICTION_STOCKS,
+    WALLET_CRYPTOS,
+    WALLET_STOCKS,
+)
+
+logger = logging.getLogger(__name__)
+
+PREDICTION_HORIZON = 5          # trading days ahead
+MIN_ROWS_FOR_ML = 120           # minimum valid feature rows to attempt XGBoost
+MAX_WORKERS_IO = 4              # threads for parallel I/O
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _safe_float(val: Any, ndigits: int = 2) -> float | None:
+    """Convert to rounded float, or *None* if impossible."""
+    if val is None:
+        return None
+    try:
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return None
+        return round(f, ndigits)
+    except (TypeError, ValueError):
+        return None
+
+
+def _trend_label(row: dict) -> str:
+    pv200 = row.get("price_vs_sma200")
+    pv50 = row.get("price_vs_sma50")
+    pv20 = row.get("price_vs_sma20")
+    if pv200 is not None and pv200 > 0:
+        return "ABOVE_SMA200"
+    if pv50 is not None and pv50 > 0:
+        return "ABOVE_SMA50"
+    if pv20 is not None and pv20 > 0:
+        return "ABOVE_SMA20"
+    return "BELOW_SMA20"
+
+
+# ---------------------------------------------------------------------------
+# Single-stock analysis
+# ---------------------------------------------------------------------------
+
+def _analyze_stock(symbol: str, fundamentals: dict) -> dict | None:
+    """Full analysis pipeline for one stock."""
+    ohlcv = fetch_ohlcv(symbol, period="2y")
+    if ohlcv is None or len(ohlcv) < MIN_ROWS_FOR_ML:
+        logger.warning("Skipping %s – insufficient data (%s rows)",
+                       symbol, len(ohlcv) if ohlcv is not None else 0)
+        return None
+
+    # Feature engineering
+    df, feature_cols = build_feature_matrix(ohlcv, fundamentals)
+    target = create_target(df, horizon=PREDICTION_HORIZON)
+    df["target"] = target
+
+    # Drop rows where technical indicators haven't warmed up or target is NaN.
+    # Fundamental columns may be entirely NaN (yfinance doesn't always provide
+    # them) so we ONLY drop on technical cols + target, then fill the rest.
+    valid = df.dropna(subset=TECHNICAL_FEATURE_COLS + ["target"]).copy()
+    for col in feature_cols:
+        if col not in TECHNICAL_FEATURE_COLS:
+            valid[col] = valid[col].fillna(0)
+
+    if len(valid) < MIN_ROWS_FOR_ML:
+        logger.warning("Skipping %s – too few valid rows (%d)", symbol, len(valid))
+        return None
+
+    X = valid[feature_cols]
+    y = valid["target"]
+
+    # Walk-forward validate → then train on full set → predict
+    predictor = StockPredictor()
+    metrics = predictor.walk_forward_validate(X, y)
+    predictor.train(X, y)
+
+    latest_features = df[feature_cols].iloc[[-1]]
+    prediction = predictor.predict(latest_features)
+
+    # Scores
+    latest_row = df.iloc[-1].to_dict()
+    tech_score = compute_technical_score(latest_row)
+    fund_score = compute_fundamental_score(fundamentals)
+    overall = compute_overall_score(
+        tech_score, fund_score,
+        prediction["confidence"], prediction["direction"],
+    )
+
+    current_price = _safe_float(ohlcv["Close"].values.flat[-1])
+
+    return {
+        "symbol": symbol,
+        "name": fundamentals.get("short_name", symbol),
+        "sector": fundamentals.get("sector", "Unknown"),
+        "price": current_price,
+        "change_1d": _safe_float((latest_row.get("return_1d") or 0) * 100),
+        "change_5d": _safe_float((latest_row.get("return_5d") or 0) * 100),
+        "change_20d": _safe_float((latest_row.get("return_20d") or 0) * 100),
+        "prediction": prediction["direction"],
+        "confidence": prediction["confidence"],
+        "probability_up": prediction["probability_up"],
+        "score": overall,
+        "technical_score": tech_score,
+        "fundamental_score": fund_score,
+        "rsi": _safe_float(latest_row.get("rsi_14"), 1),
+        "macd_trend": "BULLISH" if (latest_row.get("macd_hist") or 0) > 0 else "BEARISH",
+        "trend": _trend_label(latest_row),
+        "pe_ratio": _safe_float(fundamentals.get("pe_ratio"), 1),
+        "volume_trend": (
+            "ABOVE_AVG" if (latest_row.get("volume_ratio") or 0) > 1.0 else "BELOW_AVG"
+        ),
+        "model_accuracy": metrics.get("accuracy"),
+        "support": _safe_float(latest_row.get("bb_low"), 2),
+        "resistance": _safe_float(latest_row.get("bb_high"), 2),
+        "high_52w": _safe_float(fundamentals.get("fifty_two_week_high")),
+        "low_52w": _safe_float(fundamentals.get("fifty_two_week_low")),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Single-crypto analysis (technical-only, no fundamentals / ML-lite)
+# ---------------------------------------------------------------------------
+
+def _analyze_crypto(symbol: str) -> dict | None:
+    """Technical-analysis pipeline for one cryptocurrency."""
+    yf_symbol = f"{symbol}-USD"
+    ohlcv = fetch_ohlcv(yf_symbol, period="2y")
+    if ohlcv is None or len(ohlcv) < 60:
+        logger.warning("Skipping crypto %s – insufficient data", symbol)
+        return None
+
+    df = compute_technical_features(ohlcv)
+    latest_row = df.iloc[-1].to_dict()
+    tech_score = compute_technical_score(latest_row)
+
+    # Lightweight ML on technical features only
+    prediction: dict = {"direction": "NEUTRAL", "confidence": 0.50, "probability_up": 0.50}
+    model_accuracy: float | None = None
+
+    target = create_target(df, horizon=PREDICTION_HORIZON)
+    df["target"] = target
+    valid = df.dropna(subset=TECHNICAL_FEATURE_COLS + ["target"])
+    if len(valid) >= MIN_ROWS_FOR_ML:
+        X = valid[TECHNICAL_FEATURE_COLS]
+        y = valid["target"]
+        predictor = StockPredictor()
+        metrics = predictor.walk_forward_validate(X, y)
+        predictor.train(X, y)
+        prediction = predictor.predict(df[TECHNICAL_FEATURE_COLS].iloc[[-1]])
+        model_accuracy = metrics.get("accuracy")
+
+    # Composite: equal-weight tech + ML (no fundamentals)
+    if prediction["direction"] == "UP":
+        ml_score = 50 + (prediction["confidence"] - 0.5) * 100
+    else:
+        ml_score = 50 - (prediction["confidence"] - 0.5) * 100
+    overall = int(0.50 * tech_score + 0.50 * max(0, min(100, ml_score)))
+
+    current_price = _safe_float(ohlcv["Close"].values.flat[-1])
+
+    return {
+        "symbol": symbol,
+        "price": current_price,
+        "change_1d": _safe_float((latest_row.get("return_1d") or 0) * 100),
+        "change_5d": _safe_float((latest_row.get("return_5d") or 0) * 100),
+        "change_20d": _safe_float((latest_row.get("return_20d") or 0) * 100),
+        "prediction": prediction["direction"],
+        "confidence": prediction["confidence"],
+        "score": overall,
+        "rsi": _safe_float(latest_row.get("rsi_14"), 1),
+        "macd_trend": "BULLISH" if (latest_row.get("macd_hist") or 0) > 0 else "BEARISH",
+        "trend": _trend_label(latest_row),
+        "support": _safe_float(latest_row.get("bb_low"), 2),
+        "resistance": _safe_float(latest_row.get("bb_high"), 2),
+        "model_accuracy": model_accuracy,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+def run_prediction_analysis(
+    *,
+    progress_callback: callable | None = None,
+) -> dict[str, Any]:
+    """Run the full prediction analysis and return a JSON-serialisable dict.
+
+    Parameters
+    ----------
+    progress_callback:
+        Optional ``(step: int, total: int, message: str) -> None`` called
+        to report progress.
+
+    Returns
+    -------
+    dict with keys: ``timestamp``, ``stocks``, ``cryptos``, ``portfolio``,
+    ``model_info``.
+    """
+
+    total_steps = 4
+    def _progress(step: int, msg: str) -> None:
+        if progress_callback:
+            progress_callback(step, total_steps, msg)
+
+    _progress(1, "Fetching fundamental data")
+
+    # ---- 1. Fetch fundamentals in parallel --------------------------------
+    stock_symbols = list(set(PREDICTION_STOCKS + WALLET_STOCKS))
+    fundamentals: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS_IO) as pool:
+        futures = {pool.submit(fetch_fundamentals, sym): sym for sym in stock_symbols}
+        for future in as_completed(futures):
+            sym = futures[future]
+            try:
+                fundamentals[sym] = future.result()
+            except Exception as exc:
+                logger.error("Fundamentals error for %s: %s", sym, exc)
+                fundamentals[sym] = {"sector": "Unknown", "short_name": sym}
+
+    _progress(2, "Analyzing stocks")
+
+    # ---- 2. Analyze stocks ------------------------------------------------
+    stock_results: list[dict] = []
+    for sym in stock_symbols:
+        try:
+            result = _analyze_stock(sym, fundamentals.get(sym, {}))
+            if result:
+                stock_results.append(result)
+        except Exception as exc:
+            logger.error("Stock analysis failed for %s: %s", sym, exc)
+
+    stock_results.sort(key=lambda r: r["score"], reverse=True)
+
+    _progress(3, "Analyzing cryptocurrencies")
+
+    # ---- 3. Analyze cryptos -----------------------------------------------
+    crypto_symbols = list(set(PREDICTION_CRYPTOS + WALLET_CRYPTOS))
+    crypto_results: list[dict] = []
+    for sym in crypto_symbols:
+        try:
+            result = _analyze_crypto(sym)
+            if result:
+                crypto_results.append(result)
+        except Exception as exc:
+            logger.error("Crypto analysis failed for %s: %s", sym, exc)
+
+    crypto_results.sort(key=lambda r: r["score"], reverse=True)
+
+    _progress(4, "Compiling results")
+
+    # ---- 4. Separate portfolio items from main list -----------------------
+    wallet_stock_set = set(WALLET_STOCKS)
+    wallet_crypto_set = set(WALLET_CRYPTOS)
+
+    portfolio_stocks = [r for r in stock_results if r["symbol"] in wallet_stock_set]
+    portfolio_cryptos = [r for r in crypto_results if r["symbol"] in wallet_crypto_set]
+
+    # Model-info summary
+    stock_accuracies = [r["model_accuracy"] for r in stock_results if r.get("model_accuracy")]
+    crypto_accuracies = [r["model_accuracy"] for r in crypto_results if r.get("model_accuracy")]
+    all_accuracies = stock_accuracies + crypto_accuracies
+
+    result = {
+        "timestamp": datetime.now().isoformat(),
+        "stocks": stock_results,
+        "cryptos": crypto_results,
+        "portfolio": {
+            "stocks": portfolio_stocks,
+            "cryptos": portfolio_cryptos,
+        },
+        "model_info": {
+            "avg_accuracy": round(np.mean(all_accuracies), 4) if all_accuracies else None,
+            "stocks_analyzed": len(stock_results),
+            "cryptos_analyzed": len(crypto_results),
+            "prediction_horizon": f"{PREDICTION_HORIZON} trading days",
+            "method": "XGBoost + Multi-Factor Scoring",
+            "features_used": len(TECHNICAL_FEATURE_COLS) + len(FUNDAMENTAL_FEATURE_COLS),
+        },
+    }
+
+    logger.info(
+        "Prediction analysis complete: %d stocks, %d cryptos (avg accuracy %.3f)",
+        len(stock_results),
+        len(crypto_results),
+        result["model_info"]["avg_accuracy"] or 0,
+    )
+
+    return result

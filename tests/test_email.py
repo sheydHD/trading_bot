@@ -1,21 +1,12 @@
 """Test script for email functionality."""
 
-import os
-import sys
 import logging
-from dotenv import load_dotenv
+import os
+
+from apps.backend.utils.email import send_email
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
-
-# Add parent directory to path if needed
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-# Load environment variables from .env file
-load_dotenv()
-
-# Import the email function
-from utils.email import send_email
 
 def test_email():
     """Test sending an email with the configured settings."""

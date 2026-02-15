@@ -170,3 +170,18 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 node_modules
+
+# Environment files with secrets (keep .env.example only)
+.env
+!.env.example
+
+# Editor
+.cursorignore
+.cursor/
+
+# Build outputs
+apps/frontend/build/
+
+# Cache & logs
+apps/backend/data/cache/*.json
+apps/backend/logs/

@@ -1,259 +1,410 @@
-# AI Trading Chatbot for Stock and Cryptocurrency Analysis
+# Trading Bot
 
-This repository contains a Python-based AI trading chatbot that provides **technical analysis** and **Telegram messaging** functionalities for popular stocks and cryptocurrencies. The bot:
-
-- Gathers technical analysis data from [TradingView](https://tradingview.com) via the `tradingview_ta` library.
-- Retrieves market data from [Yahoo Finance](https://finance.yahoo.com) with the `yfinance` library.
-- Sends automated analysis reports and target price updates via Telegram.
-- Uses schedule-based tasks to execute daily or multiple times a day.
+AI-powered stock and cryptocurrency analysis platform. Combines **technical
+indicators**, **XGBoost + Logistic Regression ensemble ML**, and **fundamental
+scoring** to produce directional predictions for 34 stocks and 14
+cryptocurrencies. Results are served via a REST API and rendered in a React
+dashboard.
 
 ---
 
 ## Table of Contents
 
-1. [Features](#features)
-2. [Prerequisites](#prerequisites)
-3. [Project Structure](#project-structure)
-4. [Installation and Setup](#installation-and-setup)
-5. [Environment Variables](#environment-variables)
-6. [Running the Bot](#running-the-bot)
-7. [Configuring the Scheduler](#configuring-the-scheduler)
-8. [How the Bot Works](#how-the-bot-works)
-9. [Risk Management Parameters](#risk-management-parameters)
-10. [Logging](#logging)
-11. [Maintenance and Troubleshooting](#maintenance-and-troubleshooting)
-12. [License](#license)
+- [Architecture Overview](#architecture-overview)
+- [Quick Start](#quick-start)
+- [Project Structure](#project-structure)
+- [Environment Variables](#environment-variables)
+- [Makefile Commands](#makefile-commands)
+- [API Reference](#api-reference)
+- [Prediction Engine](#prediction-engine)
+- [Frontend Dashboard](#frontend-dashboard)
+- [Testing](#testing)
+- [Deployment](#deployment)
+- [License](#license)
 
 ---
 
-## 1. Features
-
-1. **Technical Analysis**: Fetches signals (e.g., RSI, MACD histogram, and moving averages) from TradingView for stocks and cryptocurrencies.
-2. **Risk Management**: Provides default stop-loss and risk/reward settings for each asset.
-3. **Multiple Assets**: Supports top stocks (like AAPL, MSFT, NVDA) and top cryptocurrencies (like BTC, ETH, BNB).
-4. **Automated Telegram Alerts**: Sends consolidated analysis reports to a Telegram channel.
-5. **Scheduling**: Uses the `schedule` library to automate analysis at specific times during the day.
-
----
-
-## 2. Prerequisites
-
-Make sure you have the following tools installed:
-
-- Python 3.7+
-- Pip (Python package manager)
-- A [Telegram Bot](https://core.telegram.org/bots#6-botfather) with an active bot token
-- [TradingView](https://tradingview.com) account (for the `tradingview_ta` library)
-- Node.js and npm (for the frontend)
-
----
-
-## 3. Project Structure
-
-The project has been organized into a clean, modular structure:
+## Architecture Overview
 
 ```
-.
-├── backend/                # Backend Python code
-│   ├── api/                # API endpoints
-│   ├── config/             # Configuration files (.env, requirements)
-│   ├── core/               # Core application files
-│   ├── data/               # Data storage
-│   │   └── cache/          # Cache files (JSON)
-│   ├── logs/               # Log files
-│   └── utils/              # Utility modules
-│       ├── analysis.py     # Technical analysis functions
-│       ├── cache.py        # Caching utilities
-│       ├── config.py       # Configuration constants
-│       ├── email.py        # Email notification utilities
-│       ├── price.py        # Price data functions
-│       ├── rate_limiter.py # Rate limiting utilities
-│       └── telegram.py     # Telegram bot utilities
-│
-├── docker/                 # Docker configuration
-│   ├── Dockerfile          # Docker configuration
-│   ├── docker-compose.yml  # Docker Compose configuration
-│   ├── docker-entrypoint.sh # Docker entrypoint script
-│   └── .dockerignore       # Docker ignore file
-│
-├── frontend/               # Frontend React application
-│   ├── config/             # Frontend configuration
-│   │   ├── package.json    # NPM package definition
-│   │   ├── postcss.config.js # PostCSS configuration
-│   │   └── tailwind.config.js # Tailwind CSS configuration
-│   ├── public/             # Static assets
-│   └── src/                # React source code
-│       ├── components/     # React components
-│       ├── context/        # React context providers
-│       ├── pages/          # Page components
-│       ├── services/       # API service functions
-│       └── utils/          # Frontend utilities
-│
-├── scripts/                # Utility scripts
-│   ├── cleanup.sh          # Cleanup script for removing redundant files
-│   └── setup.sh            # Setup script for initializing the project
-│
-├── run.py                  # Entry point script
-├── setup.sh -> scripts/setup.sh        # Symlink to setup script
-├── cleanup.sh -> scripts/cleanup.sh    # Symlink to cleanup script
-├── LICENSE                 # License file
-└── README.md               # Project documentation
+┌──────────────┐   HTTP :3000    ┌─────────────────────────┐
+│              │ ◄──────────────►│   React + Vite + TW     │
+│   Browser    │                 │   (nginx SPA)           │
+│              │   /api/* proxy  │   apps/frontend/        │
+└──────────────┘ ──────────────► └────────────┬────────────┘
+                                              │ reverse proxy
+                                              ▼
+                                 ┌─────────────────────────┐
+                                 │   Flask + uvicorn        │
+                                 │   (WsgiToAsgi)          │
+                                 │   apps/backend/api/     │
+                                 │   :5001                 │
+                                 └────────────┬────────────┘
+                                              │ subprocess
+                                              ▼
+                                 ┌─────────────────────────┐
+                                 │   Prediction Engine      │
+                                 │   apps/backend/          │
+                                 │     prediction/          │
+                                 │   • features.py          │
+                                 │   • model.py             │
+                                 │   • scoring.py           │
+                                 │   • analyzer.py          │
+                                 └────────────┬────────────┘
+                                              │ yfinance
+                                              ▼
+                                 ┌─────────────────────────┐
+                                 │   Yahoo Finance API      │
+                                 │   (OHLCV + fundamentals) │
+                                 └─────────────────────────┘
 ```
 
----
+**Key design decisions:**
 
-## 4. Installation and Setup
-
-1. **Clone the Repository**:
-
-   ```bash
-   git clone https://github.com/sheydHD/trading_bot.git
-   cd <your_repo_folder>
-   ```
-
-2. **Run the Setup Script**:
-
-   ```bash
-   ./setup.sh
-   ```
-
-   This script will:
-
-   - Create necessary directories
-   - Copy environment configuration files
-   - Install Python dependencies
-   - Set up the frontend (if applicable)
-
-3. **Configure Environment Variables**:
-
-   Edit the environment file with your API keys and configuration:
-
-   ```bash
-   nano backend/config/.env
-   ```
+| Decision | Rationale |
+|---|---|
+| Subprocess-based analysis | Heavy ML training (~6 min) runs in a child process so uvicorn stays responsive to health checks and status polling. |
+| XGBoost + LR ensemble | XGBoost captures non-linear patterns; Logistic Regression regularises and reduces overfitting. 60/40 soft-vote average. |
+| Walk-forward validation | Expanding-window with 5-day purge gap prevents look-ahead bias. Each fold ≈ 3 months of test data. |
+| NEUTRAL predictions | Stocks with calibrated confidence < 52% are labelled NEUTRAL rather than forcing a weak directional call. |
+| Noise-filtered targets | Adaptive threshold (0.2 × realised vol × √horizon) filters out insignificant price moves during training. |
 
 ---
 
-## 5. Environment Variables
-
-| Variable             | Type    | Description                                              |
-| -------------------- | ------- | -------------------------------------------------------- |
-| `TELEGRAM_BOT_TOKEN` | string  | Your Telegram bot token obtained from BotFather          |
-| `TELEGRAM_CHAT_ID`   | integer | The chat ID (or channel ID) where the bot sends messages |
-
-The environment variables are stored in:
-
-- `backend/config/.env` for development
-- `backend/config/.env.production` for production
-
-> **Note**: Keep these files secret and avoid committing them to version control.
-
----
-
-## 6. Running the Bot
-
-Run the backend script:
+## Quick Start
 
 ```bash
-./run.py
+# 1. Clone
+git clone https://github.com/sheydHD/trading_bot.git
+cd trading_bot
+
+# 2. Configure
+cp .env.example .env
+# Edit .env — at minimum set API_KEY
+
+# 3. Build & launch
+make build
+make up
+
+# 4. Verify
+curl http://localhost:5001/api/health     # → {"status": "healthy"}
+open http://localhost:3000                 # Dashboard
 ```
 
-For the frontend (if applicable):
+The frontend serves at **http://localhost:3000**, the API at **http://localhost:5001**.
+
+---
+
+## Project Structure
+
+```
+trading_bot/
+├── .env.example              # Environment template (copy to .env)
+├── compose.yaml              # Docker Compose — backend + frontend services
+├── Makefile                  # All project commands (make help)
+├── pyproject.toml            # Python project config, deps (Poetry)
+├── poetry.lock               # Locked dependency versions
+│
+├── apps/
+│   ├── backend/              # Python API + analysis engine
+│   │   ├── Dockerfile        # python:3.10-slim, uvicorn CMD
+│   │   ├── api/
+│   │   │   └── app.py        # Flask REST API (4 routes)
+│   │   ├── core/
+│   │   │   └── main.py       # Legacy CLI analysis engine
+│   │   ├── prediction/       # ML prediction engine ← see prediction/README.md
+│   │   │   ├── analyzer.py   #   Orchestrator: fetch → features → model → score
+│   │   │   ├── features.py   #   24 technical features + target creation
+│   │   │   ├── model.py      #   XGBoost + LR ensemble, walk-forward CV
+│   │   │   ├── scoring.py    #   Multi-factor 0–100 scoring
+│   │   │   └── run_analysis.py  # Subprocess entry-point
+│   │   ├── utils/
+│   │   │   ├── analysis.py   #   TradingView helpers
+│   │   │   ├── cache.py      #   PersistentCache (JSON, thread-safe)
+│   │   │   ├── config.py     #   Env vars, asset lists, constants
+│   │   │   ├── email.py      #   Gmail SMTP notifications
+│   │   │   ├── price.py      #   Yahoo Finance price fetcher
+│   │   │   ├── rate_limiter.py  # Rate-limiting decorator
+│   │   │   └── telegram.py   #   Telegram bot messaging
+│   │   ├── data/cache/       # Runtime cache (gitignored)
+│   │   └── logs/             # Log files (gitignored)
+│   │
+│   └── frontend/             # React 18 + Vite 5 + Tailwind 3
+│       ├── Dockerfile        # Multi-stage: node build → nginx serve
+│       ├── nginx.conf        # SPA routing + /api reverse proxy
+│       └── src/
+│           ├── App.jsx       # Root layout
+│           ├── pages/
+│           │   └── Dashboard.jsx     # Main dashboard view
+│           ├── hooks/
+│           │   └── useDashboard.js   # ViewModel (MVVM)
+│           ├── services/
+│           │   └── api.js            # Axios client
+│           ├── components/
+│           │   ├── DataTable.jsx     # Sortable table (3 presets)
+│           │   ├── Header.jsx        # Nav + status indicator
+│           │   ├── Footer.jsx        # Copyright
+│           │   ├── ProgressBar.jsx   # Analysis progress
+│           │   └── ErrorBoundary.jsx # Error boundary
+│           └── utils/
+│               └── format.js         # Number/colour formatters
+│
+├── scripts/
+│   ├── run.py                # Local dev: uvicorn with hot-reload
+│   └── setup.py              # Full project setup (Poetry + pnpm)
+│
+└── tests/                    # pytest suite (45 tests)
+    ├── conftest.py
+    ├── test_api.py           # 9 tests
+    ├── test_cache.py         # 8 tests
+    ├── test_config.py        # 17 tests
+    └── test_email.py         # 11 tests
+```
+
+---
+
+## Environment Variables
+
+Copy `.env.example` → `.env` and configure:
+
+### Required
+
+| Variable | Description | Example |
+|---|---|---|
+| `API_KEY` | Authentication key for protected endpoints | `my-secret-key-123` |
+
+### Notifications (optional)
+
+| Variable | Description | Default |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token from [@BotFather](https://t.me/BotFather) | — |
+| `TELEGRAM_CHAT_ID` | Target chat / channel ID | — |
+| `EMAIL_ENABLED` | Enable email alerts | `false` |
+| `EMAIL_ADDRESS` | Sender Gmail address | — |
+| `EMAIL_PASSWORD` | Gmail [app password](https://support.google.com/accounts/answer/185833) | — |
+| `EMAIL_RECIPIENT` | Recipient email address | — |
+
+### Application
+
+| Variable | Description | Default |
+|---|---|---|
+| `ALLOWED_ORIGINS` | CORS origins (comma-separated) | `http://localhost:3000` |
+| `FLASK_ENV` | `production` or `development` | `production` |
+| `ANALYSIS_MODE` | Legacy engine mode (`light` / `full`) | `full` |
+| `VITE_API_URL` | Frontend API base URL (build-time) | `/api` |
+| `VITE_API_KEY` | Frontend API key (build-time) | — |
+
+---
+
+## Makefile Commands
+
+Run `make help` for the full list.
+
+### Docker (production)
+
+| Command | Description |
+|---|---|
+| `make build` | Build all Docker images |
+| `make up` | Start all services (detached) |
+| `make down` | Stop and remove containers |
+| `make logs` | Tail logs from all containers |
+| `make restart` | Restart all services |
+| `make up-backend` | Start backend only |
+| `make up-frontend` | Start frontend only |
+| `make restart-backend` | Restart backend only |
+| `make restart-frontend` | Restart frontend only |
+
+### Local development
+
+| Command | Description |
+|---|---|
+| `make setup` | Full local setup (Poetry + pnpm) |
+| `make dev` | Run backend + frontend locally |
+| `make dev-backend` | uvicorn with hot-reload (:5001) |
+| `make dev-frontend` | Vite dev server (:3000) |
+
+### Quality
+
+| Command | Description |
+|---|---|
+| `make lint` | Run ruff linter |
+| `make test` | Run pytest suite |
+| `make clean` | Remove build artifacts and caches |
+
+---
+
+## API Reference
+
+Base URL: `http://localhost:5001`
+
+All endpoints except `/api/health` require the `X-API-Key` header (or run
+in `FLASK_ENV=development` for unauthenticated access).
+
+### `GET /api/health`
+
+Health check. No authentication.
+
+```json
+{ "status": "healthy" }
+```
+
+### `POST /api/analysis/run`
+
+Start a new analysis. Returns immediately; work runs in a subprocess.
 
 ```bash
-cd frontend
-npm start
+curl -X POST -H "X-API-Key: $API_KEY" http://localhost:5001/api/analysis/run
 ```
 
-### Using Docker (optional)
+```json
+{ "success": true, "message": "Analysis started – poll /api/analysis/status for progress" }
+```
 
-To run the application with Docker:
+### `GET /api/analysis/status`
+
+Poll analysis progress.
+
+```json
+{
+  "is_running": true,
+  "current_step": 2,
+  "total_steps": 4,
+  "current_step_name": "Analyzing stocks",
+  "elapsed_time": 45.2,
+  "logs": [
+    { "timestamp": "14:30:01", "type": "info", "message": "Fetching fundamental data" }
+  ]
+}
+```
+
+### `GET /api/analysis/latest`
+
+Retrieve cached results from the most recent analysis run.
+
+<details>
+<summary>Response shape (abbreviated)</summary>
+
+```json
+{
+  "timestamp": "2026-02-15T14:35:29",
+  "stocks": [
+    {
+      "symbol": "AAPL",
+      "name": "Apple Inc.",
+      "sector": "Technology",
+      "price": 245.12,
+      "prediction": "DOWN",
+      "confidence": 0.627,
+      "score": 46,
+      "model_accuracy": 0.556
+    }
+  ],
+  "cryptos": [ { "symbol": "BTC", "prediction": "UP", "confidence": 0.537 } ],
+  "portfolio": { "stocks": [], "cryptos": [] },
+  "model_info": {
+    "avg_accuracy": 0.503,
+    "stocks_analyzed": 34,
+    "cryptos_analyzed": 14,
+    "prediction_horizon": "5 trading days",
+    "method": "XGBoost + LR Ensemble + Multi-Factor Scoring",
+    "features_used": 24
+  }
+}
+```
+
+</details>
+
+---
+
+## Prediction Engine
+
+The ML pipeline lives in `apps/backend/prediction/`. See
+[apps/backend/prediction/README.md](apps/backend/prediction/README.md) for
+detailed methodology and technical documentation.
+
+**Pipeline:**
+
+```
+Yahoo Finance OHLCV (5 years, daily)
+        │
+        ▼
+  compute_technical_features()    24 features across 6 categories
+        │
+        ▼
+  create_target()                 noise-filtered binary classification
+        │
+        ▼
+  walk_forward_validate()         expanding window, 63-day folds, 5-day purge
+        │
+        ▼
+  train()                         XGBoost + Logistic Regression ensemble
+        │
+        ▼
+  predict()                       calibrated probability → UP / DOWN / NEUTRAL
+        │
+        ▼
+  compute_overall_score()         weighted blend: tech + fundamentals + ML
+```
+
+---
+
+## Frontend Dashboard
+
+React 18 SPA with MVVM architecture. See
+[apps/frontend/README.md](apps/frontend/README.md) for component documentation.
+
+```
+App
+├── Header          nav bar + live backend status indicator
+├── Dashboard       summary cards + data tables + progress
+│   ├── SummaryCard ×4
+│   ├── DataTable   sortable, 3 column presets (stock / crypto / portfolio)
+│   └── ProgressBar analysis progress
+└── Footer
+```
+
+---
+
+## Testing
 
 ```bash
-cd docker
-docker-compose up
+make test
 ```
 
+45 tests across 4 files:
+
+| File | Tests | Scope |
+|---|---|---|
+| `test_api.py` | 9 | Health, status, CORS, SPA routing |
+| `test_cache.py` | 8 | Get/set, expiry, atomic writes, reload |
+| `test_config.py` | 17 | Env loading, defaults, asset list integrity |
+| `test_email.py` | 11 | Email formatting, SMTP, enable/disable |
+
 ---
 
-## 7. Configuring the Scheduler
+## Deployment
 
-The scheduler configuration is in `backend/core/main.py`. By default, it schedules tasks at 08:00 and 16:00:
+### Docker (recommended)
 
-```python
-schedule.every().day.at("08:00").do(daily_job)
-schedule.every().day.at("16:00").do(daily_job)
+```bash
+make build && make up
 ```
 
-You can easily change or add more triggers. For example:
+Two containers:
+- **backend** — `python:3.10-slim`, uvicorn on `:5001`, healthcheck every 30s
+- **frontend** — `nginx:stable-alpine`, SPA on `:3000`, reverse-proxies `/api` to backend
 
-```python
-# Every 2 hours
-schedule.every(2).hours.do(daily_job)
+### Manual
 
-# Every Monday at 9:15 AM
-schedule.every().monday.at("09:15").do(daily_job)
+```bash
+make setup    # Install Poetry deps + pnpm build
+make dev      # Start both services locally
 ```
 
-For more scheduling options, refer to the [schedule library docs](https://github.com/dbader/schedule).
+Requires: Python ≥ 3.10, Node.js ≥ 18, pnpm ≥ 9.
 
 ---
 
-## 8. How the Bot Works
+## License
 
-1. **Analyze Stocks & Cryptos**: The `analyze_assets()` function loops through defined `TOP_STOCKS` and `TOP_CRYPTOS`.
-   - Detects if each symbol is for stocks (`america`) or crypto.
-   - Fetches daily & weekly `tradingview_ta` signals.
-   - Evaluates each asset with a scoring system (`evaluate_asset`).
-   - Builds DataFrames for stocks and cryptos.
-2. **Send Telegram Messages**: Summarizes top 5 stocks, top 5 cryptos, and also displays wallet assets. Messages are sent to Telegram via the `python-telegram-bot` library.
-3. **Cleanup**: Old Telegram messages are deleted to keep the chat tidy.
-
----
-
-## 9. Risk Management Parameters
-
-- `DEFAULT_STOP_LOSS = -0.30` (–30%)
-- `DEFAULT_RISK_REWARD_RATIO = 2.0`
-
-**Take-Profit Calculation**:
-
-1. `calculate_take_profit()`: If the asset drops 30%, the risk is 30%. With a 2:1 ratio, the take-profit is +60% from entry.
-2. `calculate_take_profit_atr()`: Alternative method using [ATR (Average True Range)](https://www.investopedia.com/terms/a/atr.asp) for volatility-based stop loss.
-
----
-
-## 10. Logging
-
-The bot uses Python's built-in `logging` module:
-
-```python
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
-```
-
-Logs are displayed on the console by default. Adjust the logging level or add file handlers as needed.
-
----
-
-## 11. Maintenance and Troubleshooting
-
-### 11.1 Updating the Symbol Lists
-
-- **Stock Symbols**: Update `TOP_STOCKS` or `WALLET_STOCKS` lists.
-- **Crypto Symbols**: Update `TOP_CRYPTOS` or `WALLET_CRYPTOS` lists.
-
-### 11.2 Common Issues
-
-1. **TradingView API Errors**: `tradingview_ta` might fail if the symbol or exchange is incorrect.
-2. **Telegram Rate Limits**: Keep messages under 4096 characters and pace your sends.
-3. **No Data from Yahoo Finance**: Ensure the symbol is valid (especially for cryptos, e.g., use `BTC-USD`).
-
-### 11.3 Keep Libraries Updated
-
-- `pip install --upgrade tradingview_ta yfinance python-dotenv python-telegram-bot`
-
----
-
-## 12. License
-
-This project is licensed under the [MIT License](https://opensource.org/licenses/MIT). Feel free to customize or extend.
+[MIT](LICENSE)

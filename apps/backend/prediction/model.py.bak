@@ -1,0 +1,154 @@
+"""XGBoost direction-prediction model with walk-forward validation.
+
+The model predicts whether a stock's price will be **higher** or **lower**
+after *N* trading days (binary classification).  Walk-forward cross-validation
+ensures no future data leaks into the training set.
+"""
+
+from __future__ import annotations
+
+import logging
+
+import numpy as np
+import pandas as pd
+from sklearn.metrics import accuracy_score, precision_score, recall_score
+from sklearn.preprocessing import StandardScaler
+from xgboost import XGBClassifier
+
+logger = logging.getLogger(__name__)
+
+# Default hyper-parameters – tuned for ~500-row daily stock data
+DEFAULT_PARAMS: dict = {
+    "n_estimators": 200,
+    "max_depth": 4,
+    "learning_rate": 0.05,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "min_child_weight": 5,
+    "random_state": 42,
+    "eval_metric": "logloss",
+    "verbosity": 0,
+}
+
+
+class StockPredictor:
+    """Train, validate, and predict with an XGBoost classifier."""
+
+    def __init__(self, params: dict | None = None):
+        self.params = {**DEFAULT_PARAMS, **(params or {})}
+        self.model: XGBClassifier | None = None
+        self.scaler = StandardScaler()
+        self.feature_importance: dict[str, float] = {}
+        self.validation_metrics: dict[str, float] = {}
+
+    # ------------------------------------------------------------------
+    # Walk-forward cross-validation
+    # ------------------------------------------------------------------
+    def walk_forward_validate(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        *,
+        train_window: int = 180,
+        test_window: int = 21,
+    ) -> dict[str, float]:
+        """Expanding-window walk-forward validation.
+
+        Returns accuracy / precision / recall averaged across folds.
+        """
+        predictions: list[int] = []
+        actuals: list[int] = []
+
+        total_rows = len(X)
+        if total_rows < train_window + test_window:
+            logger.warning(
+                "Not enough data for walk-forward (%d rows, need %d+%d)",
+                total_rows, train_window, test_window,
+            )
+            self.validation_metrics = {"accuracy": 0.5, "precision": 0.0, "recall": 0.0}
+            return self.validation_metrics
+
+        for start in range(0, total_rows - train_window - test_window, test_window):
+            train_end = start + train_window
+            test_end = min(train_end + test_window, total_rows)
+
+            X_train = X.iloc[start:train_end]
+            y_train = y.iloc[start:train_end]
+            X_test = X.iloc[train_end:test_end]
+            y_test = y.iloc[train_end:test_end]
+
+            if len(X_train) < train_window * 0.8 or len(X_test) == 0:
+                continue
+
+            # Check we have both classes in training set
+            if y_train.nunique() < 2:
+                continue
+
+            model = XGBClassifier(**self.params)
+            X_tr_scaled = self.scaler.fit_transform(X_train.fillna(0))
+            X_te_scaled = self.scaler.transform(X_test.fillna(0))
+
+            model.fit(X_tr_scaled, y_train, verbose=False)
+            preds = model.predict(X_te_scaled)
+
+            predictions.extend(preds.tolist())
+            actuals.extend(y_test.values.tolist())
+
+        if not predictions:
+            self.validation_metrics = {"accuracy": 0.5, "precision": 0.0, "recall": 0.0}
+            return self.validation_metrics
+
+        self.validation_metrics = {
+            "accuracy": round(accuracy_score(actuals, predictions), 4),
+            "precision": round(precision_score(actuals, predictions, zero_division=0.0), 4),
+            "recall": round(recall_score(actuals, predictions, zero_division=0.0), 4),
+            "n_folds": len(predictions) // max(test_window, 1),
+            "n_samples": len(predictions),
+        }
+        return self.validation_metrics
+
+    # ------------------------------------------------------------------
+    # Training
+    # ------------------------------------------------------------------
+    def train(self, X: pd.DataFrame, y: pd.Series) -> None:
+        """Train on the full available dataset."""
+        if y.nunique() < 2:
+            logger.warning("Cannot train – target has fewer than 2 classes")
+            return
+
+        self.model = XGBClassifier(**self.params)
+        X_scaled = self.scaler.fit_transform(X.fillna(0))
+        self.model.fit(X_scaled, y, verbose=False)
+
+        if hasattr(self.model, "feature_importances_"):
+            self.feature_importance = dict(
+                zip(X.columns, self.model.feature_importances_)
+            )
+
+    # ------------------------------------------------------------------
+    # Prediction
+    # ------------------------------------------------------------------
+    def predict(self, X: pd.DataFrame) -> dict:
+        """Return direction + confidence for the latest row(s).
+
+        Returns::
+
+            {"direction": "UP"|"DOWN"|"NEUTRAL",
+             "confidence": float,          # 0.50 – 1.00
+             "probability_up": float}      # 0.00 – 1.00
+        """
+        if self.model is None:
+            return {"direction": "NEUTRAL", "confidence": 0.50, "probability_up": 0.50}
+
+        X_scaled = self.scaler.transform(X.fillna(0))
+        proba = self.model.predict_proba(X_scaled)
+
+        prob_up = float(proba[0][1]) if proba.shape[1] == 2 else 0.5
+        direction = "UP" if prob_up > 0.5 else "DOWN"
+        confidence = round(max(prob_up, 1.0 - prob_up), 3)
+
+        return {
+            "direction": direction,
+            "confidence": confidence,
+            "probability_up": round(prob_up, 3),
+        }

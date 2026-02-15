@@ -1,0 +1,188 @@
+"""Flask API for the trading-bot prediction engine.
+
+Frontend is served by nginx (see ``apps/frontend/nginx.conf``).
+This module only exposes ``/api/*`` endpoints.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import threading
+from datetime import datetime
+
+from flask import Flask, jsonify, request
+from flask_cors import CORS
+
+from apps.backend.prediction.analyzer import run_prediction_analysis
+from apps.backend.utils.cache import PersistentCache
+
+# ---------------------------------------------------------------------------
+# App factory
+# ---------------------------------------------------------------------------
+app = Flask(__name__)
+
+_allowed_origins = [
+    o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()
+]
+if _allowed_origins:
+    CORS(app, resources={r"/api/*": {"origins": _allowed_origins}}, supports_credentials=True)
+elif os.getenv("FLASK_ENV") == "development":
+    CORS(app, supports_credentials=True)
+
+logger = logging.getLogger(__name__)
+
+API_KEY = os.getenv("API_KEY", "your-secret-api-key")
+
+# ---------------------------------------------------------------------------
+# Persistent cache
+# ---------------------------------------------------------------------------
+_CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "cache")
+os.makedirs(_CACHE_DIR, exist_ok=True)
+_CACHE_FILE = os.path.join(_CACHE_DIR, "analysis_cache.json")
+
+if os.path.exists(_CACHE_FILE):
+    try:
+        with open(_CACHE_FILE, "r") as _f:
+            analysis_cache = PersistentCache(cache_file=_CACHE_FILE, initial_data=json.load(_f))
+            logger.info("Loaded analysis cache from %s", _CACHE_FILE)
+    except Exception as exc:
+        logger.warning("Cache load failed (%s) – starting fresh", exc)
+        analysis_cache = PersistentCache(cache_file=_CACHE_FILE)
+else:
+    analysis_cache = PersistentCache(cache_file=_CACHE_FILE)
+    logger.info("Created new analysis cache at %s", _CACHE_FILE)
+
+# ---------------------------------------------------------------------------
+# Analysis status tracking
+# ---------------------------------------------------------------------------
+analysis_status: dict = {
+    "is_running": False,
+    "start_time": None,
+    "current_step": 0,
+    "total_steps": 4,
+    "current_step_name": "",
+    "logs": [],
+}
+
+
+def _authenticate() -> bool:
+    if os.getenv("FLASK_ENV") == "development":
+        return True
+    return request.headers.get("X-API-Key") == API_KEY
+
+
+def _add_log(message: str, log_type: str = "info") -> None:
+    ts = datetime.now().strftime("%H:%M:%S")
+    analysis_status["logs"].append({"timestamp": ts, "message": message, "type": log_type})
+    if len(analysis_status["logs"]) > 100:
+        analysis_status["logs"].pop(0)
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+
+@app.route("/api/health", methods=["GET"])
+def health_check():
+    return jsonify({"status": "healthy"}), 200
+
+
+@app.route("/api/analysis/status", methods=["GET"])
+def get_analysis_status():
+    if not _authenticate():
+        return jsonify({"error": "Unauthorized"}), 401
+
+    elapsed_time = None
+    if analysis_status["is_running"] and analysis_status["start_time"]:
+        elapsed_time = (datetime.now() - analysis_status["start_time"]).total_seconds() * 1000
+
+    return jsonify({
+        "is_running": analysis_status["is_running"],
+        "current_step": analysis_status["current_step"],
+        "total_steps": analysis_status["total_steps"],
+        "current_step_name": analysis_status["current_step_name"],
+        "elapsed_time": elapsed_time,
+        "logs": analysis_status["logs"],
+    })
+
+
+@app.route("/api/analysis/latest", methods=["GET"])
+def get_latest_analysis():
+    """Return cached prediction results (or run analysis if no cache)."""
+    if not _authenticate():
+        return jsonify({"error": "Unauthorized"}), 401
+
+    cached = analysis_cache.get("latest_prediction")
+    if cached:
+        return jsonify(cached)
+
+    # No cache – run prediction analysis
+    try:
+        result = run_prediction_analysis()
+        analysis_cache.set("latest_prediction", result, expiry_seconds=86400)
+        return jsonify(result)
+    except Exception as exc:
+        logger.exception("Analysis failed")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/analysis/run", methods=["POST"])
+def run_analysis():
+    """Trigger a fresh prediction analysis in a background thread.
+
+    Returns immediately with ``{"success": true, "message": "started"}``.
+    Poll ``/api/analysis/status`` for progress.
+    """
+    if not _authenticate():
+        return jsonify({"error": "Unauthorized"}), 401
+
+    if analysis_status["is_running"]:
+        return jsonify({
+            "success": False,
+            "error": "Analysis already running",
+            "status": analysis_status,
+        })
+
+    def _run_in_background():
+        try:
+            analysis_status["is_running"] = True
+            analysis_status["start_time"] = datetime.now()
+            analysis_status["current_step"] = 0
+            analysis_status["logs"] = []
+            _add_log("Starting prediction analysis")
+
+            def _progress(step: int, total: int, message: str) -> None:
+                analysis_status["current_step"] = step
+                analysis_status["total_steps"] = total
+                analysis_status["current_step_name"] = message
+                _add_log(message)
+
+            result = run_prediction_analysis(progress_callback=_progress)
+
+            execution_time = (datetime.now() - analysis_status["start_time"]).total_seconds()
+            _add_log(f"Analysis completed in {execution_time:.1f}s")
+
+            analysis_cache.set("latest_prediction", result, expiry_seconds=86400)
+        except Exception as exc:
+            _add_log(f"Error: {exc}", "error")
+            logger.exception("Analysis run failed")
+        finally:
+            analysis_status["is_running"] = False
+
+    thread = threading.Thread(target=_run_in_background, daemon=True)
+    thread.start()
+
+    return jsonify({
+        "success": True,
+        "message": "Analysis started – poll /api/analysis/status for progress",
+    })
+
+
+# ---------------------------------------------------------------------------
+# ASGI wrapper – uvicorn targets  apps.backend.api.app:asgi_app
+# ---------------------------------------------------------------------------
+from asgiref.wsgi import WsgiToAsgi  # type: ignore  # noqa: E402
+
+asgi_app = WsgiToAsgi(app)
